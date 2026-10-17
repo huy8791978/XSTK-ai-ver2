@@ -13,3 +13,6 @@ toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
+
+[runner]
+fastReruns = true
