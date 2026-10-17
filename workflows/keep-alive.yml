@@ -1,0 +1,29 @@
+# Giữ app trên Streamlit Community Cloud luôn thức (app tự "ngủ" khi lâu không có người vào).
+# Cần tạo GitHub Secret (hoặc Variable) tên APP_URL = địa chỉ app, ví dụ https://xstk-tutor.streamlit.app
+name: Keep Streamlit app awake
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"   # mỗi 3 giờ (giờ UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Playwright
+        run: |
+          pip install playwright==1.48.0
+          python -m playwright install --with-deps chromium
+      - name: Visit and wake the app
+        env:
+          APP_URL: ${{ secrets.APP_URL || vars.APP_URL }}
+        run: python .github/keep_alive.py
