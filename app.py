@@ -19,7 +19,7 @@ from google.genai import errors, types
 from PIL import Image, ImageOps
 
 # ───────────────────────── CẤU HÌNH ─────────────────────────
-MODEL = "gemini-2.5-flash"  # đổi sang "gemini-2.5-pro" nếu cần chấm kĩ hơn (chậm và đắt hơn)
+MODEL = "gemini-3.5-flash-lite"  # đổi sang "gemini-2.5-pro" nếu cần chấm kĩ hơn (chậm và đắt hơn)
 # Cách 1 (khuyên dùng): đặt GEMINI_API_KEY trong Streamlit Cloud > Settings > Secrets.
 # Cách 2: dán khóa (dạng AIza...) vào dòng dưới. Chỉ làm vậy khi repo GitHub ở chế độ PRIVATE:
 # khóa nằm trong repo public sẽ bị lộ và bị thu hồi.
