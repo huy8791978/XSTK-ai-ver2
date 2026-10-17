@@ -14,7 +14,6 @@ import json
 import os
 import random
 import re
-import textwrap
 import threading
 import time
 import datetime as dt
@@ -24,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from google import genai
 from google.genai import errors, types
 from PIL import Image, ImageOps
@@ -213,7 +213,8 @@ FOCUS = {
 _PRACTICE = "Soạn bài tập XSTK bám sát chương trình, số liệu cụ thể, đủ dữ kiện, giải được, có lời giải đúng. "
 SYS_MC = BASE + _PRACTICE + (
     "Soạn đúng 5 câu trắc nghiệm, 4 phương án, phương án nhiễu phản ánh sai lầm phổ biến, vị trí đáp án đúng phân bố ngẫu nhiên "
-    "giữa A-D, 'sai_lam' chỉ gồm các phương án sai. 'chien_luoc' theo bước 1-2 của quy trình giải, TUYỆT ĐỐI không tiết lộ "
+    "giữa A-D, 'sai_lam' chỉ gồm các phương án sai. Mọi công thức, phân số, kí hiệu trong đề và trong từng phương án "
+    "PHẢI đặt giữa hai dấu $ (ví dụ \"$\\\\frac{7}{15}$\"). 'chien_luoc' theo bước 1-2 của quy trình giải, TUYỆT ĐỐI không tiết lộ "
     "đáp án hay kết quả số. Kiểm tra kĩ đáp án trước khi trả lời." + JSON_RULE +
     ' Cấu trúc: {"cau":[{"de":"...","lua_chon":{"A":"..","B":"..","C":"..","D":".."},"dap_an":"B",'
     '"chien_luoc":"...","loi_giai":"lời giải chi tiết nêu rõ đáp án","sai_lam":{"A":{"loai":"(một trong: '
@@ -268,6 +269,47 @@ SYS_SIMILAR = BASE + SOLVE_FLOW + (
     "bài 2 cùng phương pháp nhưng đổi cái phải tìm; bài 3 nâng cao hoặc kết hợp thêm một kiến thức. "
     "Mỗi bài đủ dữ kiện, giải được, kèm chiến lược (không lộ đáp án) và lời giải đúng." + JSON_RULE +
     ' Cấu trúc: {"chu_de":"tên dạng bài","bai":[{"muc_do":"Tương tự","de":"...","chien_luoc":"...","loi_giai":"..."}]}'
+)
+CASIO_GUIDE = r"""
+Tên các mục trên máy hiển thị bằng tiếng Anh. Số thứ tự mục có thể khác đôi chút giữa các đời máy: hãy chọn theo **tên** hiện trên màn hình.
+
+**Chuẩn bị**
+- Khôi phục cài đặt gốc khi máy chạy lạ: `SHIFT` `9` (RESET) → `3` (Initialize All) → `=` → `AC`.
+- Đổi kết quả giữa phân số và số thập phân: phím `S⇔D`.
+- Lưu kết quả vào biến A: `SHIFT` `RCL` (STO) → phím `(−)` (biến A). Gọi lại: `ALPHA` `(−)`.
+
+**Giai thừa, tổ hợp, chỉnh hợp**
+- $n!$: nhập $n$ → `SHIFT` `x⁻¹` (x!) → `=`.
+- $C_n^k$: nhập $n$ → `SHIFT` `÷` (nCr) → nhập $k$ → `=`. Ví dụ $C_{10}^{2}$: `10` `SHIFT` `÷` `2` `=` → 45.
+- $A_n^k$: nhập $n$ → `SHIFT` `×` (nPr) → nhập $k$ → `=`.
+
+**Thống kê một biến** (trung bình, phương sai, độ lệch chuẩn)
+1. `MENU` → **Statistics** → **1-Variable**.
+2. Nếu dữ liệu có tần số: `SHIFT` `MENU` (SETUP) → `▼` → **Statistics** → **Frequency? On**, rồi vào lại bước 1.
+3. Nhập từng giá trị cột x (và cột Freq), mỗi số bấm `=`. Xong bấm `AC`.
+4. `OPTN` → **1-Variable Calc**: đọc $\bar{x}$, $\sigma_x$ (chia cho $n$), $s_x$ (độ lệch chuẩn mẫu hiệu chỉnh, chia cho $n-1$), $n$.
+
+**Hồi quy tuyến tính, hệ số tương quan**
+1. `MENU` → **Statistics** → **y=a+bx**, nhập cặp số (x, y), xong bấm `AC`.
+2. `OPTN` → **Regression Calc**: đọc $a$, $b$ (đường $y=a+bx$) và hệ số tương quan $r$.
+
+**Phân phối xác suất** (`MENU` → **Distribution**, chọn **Variable** để tính một giá trị)
+- **Binomial PD**: $P(X = x)$ với $X \sim B(N, p)$; nhập x, N, p.
+- **Binomial CD**: $P(X \le x)$. Muốn $P(X \ge k)$ thì lấy $1 - P(X \le k-1)$.
+- **Poisson PD / Poisson CD**: $P(X = x)$ và $P(X \le x)$; nhập x, λ.
+- **Normal CD**: $P(a \le X \le b)$ với $X \sim N(\mu, \sigma^2)$; nhập Lower $= a$, Upper $= b$, σ, μ.
+  Tính $P(X \le b)$ thì nhập Lower $= -10^{99}$ (`(−)` `1` `×10ˣ` `99`); tính $P(X \ge a)$ thì nhập Upper $= 10^{99}$.
+- **Inverse Normal**: biết diện tích bên trái (Area), σ, μ thì tìm x. Tra $z_{\alpha/2}$: Area $= 1 - \alpha/2$, σ $= 1$, μ $= 0$
+  (ví dụ $\alpha = 0{,}05$ cho $z \approx 1{,}96$).
+
+**Mẹo kiểm tra**: xác suất luôn nằm trong $[0, 1]$; tổng xác suất trong bảng phân phối bằng 1; với phân phối chuẩn,
+$P(\mu - \sigma \le X \le \mu + \sigma) \approx 0{,}6827$.
+"""
+SYS_CASIO = BASE + (
+    "Hướng dẫn học sinh dùng máy tính Casio fx-580VN X để tính các đại lượng trong bài toán XSTK được cho. "
+    "Chỉ dùng các thao tác có trong bảng tra dưới đây, ghi phím trong dấu `...`, đánh số từng bước, nêu màn hình kết quả "
+    "nên hiện gì (ví dụ đại lượng nào), KHÔNG nêu đáp số cuối cùng của bài. Nếu một phần bài không cần máy tính, nói rõ. "
+    "Kết thúc bằng một cách kiểm tra nhanh kết quả trên máy. Bảng tra thao tác:\n" + CASIO_GUIDE
 )
 SYS_PLAN = BASE + (
     "Bạn nhận thống kê hồ sơ học XSTK của một học sinh (JSON). Chỉ dựa vào số liệu đó, không bịa. Trả lời dưới 350 từ, gồm: "
@@ -719,7 +761,19 @@ def profile_dialog():
         st.markdown(S.r_plan)
 
 
+@st.dialog("Bấm máy Casio fx-580VN X cho Xác suất thống kê", width="large")
+def casio_dialog():
+    st.markdown(CASIO_GUIDE)
+    st.caption("Muốn hướng dẫn bấm máy cho đúng bài bạn đang làm: vào quy trình Giải toán, bước 4, bấm “Bấm máy fx-580VN X”.")
+    disclaimer()
+
+
 # ───────────────────────── GIAO DIỆN CHUNG ─────────────────────────
+def disclaimer():
+    st.markdown('<div class="disclaimer" role="note"><b>Lưu ý:</b><span>Nội dung do AI tạo ra, xin hãy kiểm chứng '
+                'với đề cương và giáo trình môn học.</span></div>', unsafe_allow_html=True)
+
+
 BELL = (  # đường cong phân phối chuẩn, vùng giữa được tô
     '<svg class="bell" viewBox="0 0 64 36" role="img" aria-label="đường cong phân phối chuẩn">'
     '<path d="M22 33 L22 11 C25 6 28 4 32 4 C36 4 39 6 42 11 L42 33 Z" fill="currentColor" opacity=".18"/>'
@@ -745,8 +799,10 @@ def _art():
         '<text x="117" y="216" text-anchor="middle" class="t">μ − σ</text>'
         '<text x="249" y="216" text-anchor="middle" class="t">μ + σ</text>'
         '<text x="18" y="34" class="f">P(A | B) = P(AB) / P(B)</text>'
-        '<text x="250" y="96" class="f">σ² = E(X²) − μ²</text>'
-        '<text x="18" y="70" class="f">x̄ ± z·s/√n</text>'
+        '<text x="250" y="96" class="f">σ<tspan dy="-6" font-size="10">2</tspan><tspan dy="6"> = E(X</tspan>'
+        '<tspan dy="-6" font-size="10">2</tspan><tspan dy="6">) − μ</tspan><tspan dy="-6" font-size="10">2</tspan></text>'
+        '<text x="18" y="70" class="f">x</text><line x1="18.5" y1="58.5" x2="26" y2="58.5" stroke="#1F2A27" '
+        'stroke-width="1.2" opacity=".72"/><text x="30" y="70" class="f">± z · s / √n</text>'
         '</svg>'
     )
 
@@ -781,7 +837,8 @@ h4{font-size:1.25rem!important;padding:.1rem 0 .4rem!important}
 .chips span{font-size:.8rem;font-weight:500;padding:.3rem .7rem;border-radius:999px;background:var(--teal-2);color:var(--teal)}
 .hero-art svg{width:100%;height:auto;display:block}
 .hero-art .t{font:500 13px 'Be Vietnam Pro',sans-serif;fill:var(--muted)}
-.hero-art .f{font:italic 500 14px 'Newsreader',Georgia,serif;fill:var(--ink);opacity:.72}
+.hero-art .f{font-style:italic;font-weight:500;font-size:14px;fill:var(--ink);opacity:.72;
+  font-family:'Cambria Math','STIX Two Math','Latin Modern Math','Times New Roman','Newsreader',serif}
 .flow{display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;border-radius:16px;background:var(--card);
   border:1px solid var(--line);margin:.2rem 0 .8rem}
 .flow .ico{flex:none;width:42px;height:42px;border-radius:12px;background:var(--teal);color:#fff;display:grid;place-items:center;
@@ -804,11 +861,21 @@ h4{font-size:1.25rem!important;padding:.1rem 0 .4rem!important}
 .bar span{display:block;height:100%;background:var(--teal);border-radius:9px;transition:width .3s ease}
 .sec{font-family:'Newsreader',Georgia,serif;font-size:1.25rem;font-weight:600;margin:.2rem 0 .3rem}
 div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:16px}
-.stButton>button,.stDownloadButton>button,.stFormSubmitButton>button{width:100%;min-height:46px;border-radius:12px;
-  font-weight:500;transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}
-.stButton>button:hover,.stDownloadButton>button:hover{transform:translateY(-1px);border-color:var(--teal);
+/* mọi nút giãn đều theo cột chứa nó: các hàng nút thẳng hàng, cùng kích thước */
+[data-testid="stElementContainer"]:has(.stButton),[data-testid="stElementContainer"]:has(.stDownloadButton),
+[data-testid="stElementContainer"]:has(.stFormSubmitButton),[data-testid="stElementContainer"]:has([data-testid="stPopover"]){width:100%!important}
+.stButton,.stDownloadButton,.stFormSubmitButton,[data-testid="stPopover"]{width:100%!important}
+.stButton button,.stDownloadButton button,.stFormSubmitButton button,[data-testid="stPopover"] button{width:100%!important;
+  min-height:46px;border-radius:12px;font-weight:500;justify-content:center;
+  transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}
+.stButton button p,.stDownloadButton button p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stButton button:hover,.stDownloadButton button:hover{transform:translateY(-1px);border-color:var(--teal);
   box-shadow:0 6px 16px -10px rgba(15,92,90,.6)}
-.stButton>button:active{transform:scale(.98)}
+.stButton button:active{transform:scale(.98)}
+[data-testid="stColumn"]{min-width:0}
+[data-testid="stPills"] button{min-height:34px}
+.disclaimer{display:flex;gap:.5rem;align-items:flex-start;margin-top:.8rem;padding:.7rem .9rem;border-radius:12px;
+  background:#F6EBDD;border:1px solid #E7D3B8;color:#6B4A1F;font-size:.86rem;line-height:1.5}
 [data-testid="stButtonGroup"] button{min-height:42px}
 :focus-visible{outline:2px solid var(--teal)!important;outline-offset:2px}
 .score{display:flex;align-items:baseline;gap:.3rem;font-family:'Newsreader',Georgia,serif;margin:.1rem 0 .5rem}
@@ -878,6 +945,71 @@ def toggle(k):
     S[k] = not S.get(k)
 
 
+_TEX = re.compile(r"\\[a-zA-Z]+|[\^_]")
+
+
+def mathify(s):
+    """AI đôi khi quên đặt công thức trong $...$ (ví dụ phương án "\\frac{7}{15}"): bọc các cụm công thức lại để KaTeX hiển thị."""
+    s = str(s or "")
+    if "$" in s or not _TEX.search(s):
+        return s
+    out, run = [], []
+    for tok in s.split(" "):
+        if _TEX.search(tok) or (run and re.fullmatch(r"[=<>+\-*/()\d.,]+|\\?[a-zA-Z]", tok)):
+            run.append(tok)
+            continue
+        if run:
+            out.append("$" + " ".join(run) + "$")
+            run = []
+        out.append(tok)
+    if run:
+        out.append("$" + " ".join(run) + "$")
+    return " ".join(out)
+
+
+def half():
+    """Một nút đứng riêng chiếm nửa hàng, để các nút trên trang có cùng bề rộng."""
+    return st.columns(2)[0]
+
+
+# ── Bàn phím kí hiệu toán cho ô gõ ──
+SYMBOLS = ["∩", "∪", "Ā", "∅", "Ω", "⊂", "∈", "|", "≤", "≥", "≠", "≈", "±", "√", "π", "μ", "σ", "σ²", "λ", "α",
+           "χ²", "∑", "∞", "→", "⇒", "×", "÷", "·", "²", "³", "⁻¹", "x̄", "p̂", "n!"]
+TEX_TEMPLATES = {
+    "Phân số": r"$\frac{a}{b}$", "Tổ hợp": r"$C_{n}^{k}$", "Chỉnh hợp": r"$A_{n}^{k}$", "Căn": r"$\sqrt{x}$",
+    "Lũy thừa": r"$x^{2}$", "Chỉ số": r"$x_{i}$", "Biến cố đối": r"$\overline{A}$", "XS có điều kiện": r"$P(A \mid B)$",
+    "Trung bình mẫu": r"$\bar{x}$", "Tổng": r"$\sum_{i=1}^{n} x_i$", "Kì vọng": r"$E(X)$", "Phương sai": r"$D(X)$",
+    "Tích phân": r"$\int_{a}^{b} f(x)\,dx$", "Hệ": r"$\begin{cases} a \\ b \end{cases}$",
+}
+
+
+def _insert(target, pk, templates, limit):
+    v = S.get(pk)
+    if v:
+        add = TEX_TEMPLATES[v] if templates else v
+        cur = S.get(target) or ""
+        sep = " " if templates and cur and not cur.endswith((" ", "\n")) else ""
+        S[target] = (cur + sep + add)[:limit]
+    S[pk] = None  # bỏ chọn để bấm lại cùng kí hiệu được
+
+
+def math_area(label, key, height=130, max_chars=4000, placeholder=None, collapsed=False):
+    """Ô gõ có bàn phím kí hiệu toán và xem trước công thức (LaTeX trong $...$)."""
+    v = st.text_area(label, key=key, height=height, max_chars=max_chars, placeholder=placeholder,
+                     label_visibility="collapsed" if collapsed else "visible")
+    with st.expander("Bàn phím toán · xem trước công thức", icon=":material/keyboard:"):
+        st.pills("Kí hiệu", SYMBOLS, key=f"{key}__sym", on_change=_insert, args=(key, f"{key}__sym", False, max_chars))
+        st.pills("Mẫu công thức", list(TEX_TEMPLATES), key=f"{key}__tex", on_change=_insert,
+                 args=(key, f"{key}__tex", True, max_chars))
+        st.caption("Bấm để chèn vào cuối ô. Mẫu công thức viết bằng LaTeX giữa hai dấu $, sửa a, b, n, k... thành số của bạn.")
+        if (v or "").strip():
+            with st.container(border=True):
+                st.markdown(v)
+        else:
+            st.caption("Phần xem trước hiện ở đây khi bạn gõ.")
+    return v
+
+
 def _token():
     return f"{random.getrandbits(40):x}"
 
@@ -893,10 +1025,11 @@ def result_box(title, body):
         st.markdown(body)
 
 
-def ai_button(R, slot, label, icon, run, primary=True):
-    """Nút gọi AI; kết quả lưu ở R[slot] để không mất khi chuyển bước."""
-    if st.button(label, icon=icon, type="primary" if primary and not R.get(slot) else "secondary",
-                 key=f"b_{R['id']}_{slot}"):
+def ai_button(R, slot, label, icon, run, primary=True, solo=True):
+    """Nút gọi AI; kết quả lưu ở R[slot] để không mất khi chuyển bước. solo: nút đứng riêng thì chiếm nửa hàng."""
+    where = half() if solo else st
+    if where.button(label, icon=icon, type="primary" if primary and not R.get(slot) else "secondary",
+                    key=f"b_{R['id']}_{slot}"):
         with st.spinner("Trợ giảng AI đang soạn..."):
             v = run()
         if v:
@@ -973,9 +1106,9 @@ def self_check(wf, R, topic):
     with st.container(border=True):
         sec(f"Tự phát biểu lại {what}")
         st.caption("Viết bằng lời của bạn, không chép lại. AI chỉ ra chỗ thiếu dấu hiệu bản chất, giả thiết hoặc điều kiện.")
-        txt = st.text_area("Phát biểu của bạn", key=f"w{R['id']}_self", height=110, max_chars=1500,
-                           label_visibility="collapsed", placeholder="Ví dụ: ... là ... khi và chỉ khi ...")
-        if st.button("Nhận xét phát biểu", icon=":material/rate_review:", key=f"b_{R['id']}_self"):
+        txt = math_area("Phát biểu của bạn", f"w{R['id']}_self", height=110, max_chars=1500, collapsed=True,
+                        placeholder="Ví dụ: ... là ... khi và chỉ khi ...")
+        if half().button("Nhận xét phát biểu", icon=":material/rate_review:", key=f"b_{R['id']}_self"):
             if not txt.strip():
                 st.warning("Hãy viết phát biểu của bạn trước.")
             else:
@@ -1017,7 +1150,7 @@ def oral_block(wf, R, topic):
     O = R.get("oral")
     plan = ORAL_CONCEPT if wf == "concept" else ORAL_THEOREM
     st.caption("Giám khảo AI hỏi lần lượt 5 câu. " + plan.split(": ", 1)[1])
-    if st.button("Bắt đầu vấn đáp" if not O else "Vấn đáp lại từ đầu", icon=":material/record_voice_over:",
+    if half().button("Bắt đầu vấn đáp" if not O else "Vấn đáp lại từ đầu", icon=":material/record_voice_over:",
                  type="primary" if not O else "secondary", key=f"b_{R['id']}_ostart"):
         O = R["oral"] = {"topic": topic, "kind": kind, "res": None,
                          "msgs": [{"role": "user", "content": "Hãy bắt đầu vấn đáp."},
@@ -1048,7 +1181,7 @@ def oral_block(wf, R, topic):
         st.progress(min(answered, 5) / 5, text=f"Đã trả lời {min(answered, 5)}/5 câu")
     if answered >= 5 and not done:
         st.info("Bạn đã trả lời đủ 5 câu. Bấm “Kết thúc và chấm điểm” để nhận kết quả.")
-    if not done and answered >= 1 and st.button("Kết thúc và chấm điểm", icon=":material/fact_check:",
+    if not done and answered >= 1 and half().button("Kết thúc và chấm điểm", icon=":material/fact_check:",
                                                   type="primary", key=f"b_{R['id']}_oend"):
         tr = "\n".join(f"{'Giám khảo' if m['role'] == 'assistant' else 'Học sinh'}: {m['content']}" for m in O["msgs"][1:])
         with st.spinner("Đang chấm phần vấn đáp..."):
@@ -1110,9 +1243,9 @@ def get_items(kind, wf, topic, level):
 
 def mc_card(k, i, q, topic, wf):
     with st.container(border=True):
-        st.markdown(f"**Câu {i + 1}.** {q['de']}")
+        st.markdown(f"**Câu {i + 1}.** {mathify(q['de'])}")
         pick = st.radio("Chọn đáp án", list("ABCD"), index=None, key=k, label_visibility="collapsed",
-                        format_func=lambda x: f"{x}. {q['lua_chon'][x]}")
+                        format_func=lambda x: f"{x}. {mathify(q['lua_chon'][x])}")
         a, b, c = st.columns(3)
         a.button("Gợi ý", icon=":material/lightbulb:", key=f"b_{k}_h", on_click=toggle, args=(f"{k}_h",))
         if b.button("Kiểm tra", icon=":material/task_alt:", type="primary", key=f"b_{k}_g"):
@@ -1142,8 +1275,8 @@ def mc_card(k, i, q, topic, wf):
 
 def es_card(k, i, q, topic, wf):
     with st.container(border=True):
-        st.markdown(f"**Câu {i + 1}.** {q['de']}")
-        ans = st.text_area("Bài làm của bạn", key=f"{k}_a", height=130, max_chars=4000)
+        st.markdown(f"**Câu {i + 1}.** {mathify(q['de'])}")
+        ans = math_area("Bài làm của bạn", f"{k}_a", height=130)
         with st.expander("Hoặc tải ảnh/PDF bài làm"):
             fl = st.file_uploader("Ảnh/PDF", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True,
                                   key=f"{k}_f", label_visibility="collapsed")
@@ -1201,35 +1334,97 @@ def practice_block(wf, R, topic):
 
 
 # ── Sơ đồ tư duy ──
-def to_dot(tree):
-    pal = ["#0F5C5A", "#B4531F", "#4F6D3A", "#8A6A12", "#2F5D8C", "#8A3B4E"]
-    cnt = [0]
-    out = ['digraph G{rankdir=LR;bgcolor="transparent";ranksep=0.5;nodesep=0.18;'
-           'node[shape=box,style="rounded,filled",fontname="Helvetica",fontsize=13,margin="0.16,0.08",penwidth=0];'
-           'edge[penwidth=1.5,arrowhead=none];']
+MINDMAP_HTML = """<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;background:transparent;font-family:'Be Vietnam Pro',system-ui,'Segoe UI',Roboto,sans-serif}
+#wrap{position:relative;border:1px solid #D9D2C3;border-radius:16px;background:#FBF9F4;overflow:hidden}
+svg{display:block;width:100%;height:__H__px;touch-action:none;cursor:grab}
+.bar{position:absolute;top:10px;right:10px;display:flex;gap:6px;flex-wrap:wrap;z-index:2}
+.bar button{font:600 13px 'Be Vietnam Pro',sans-serif;border:1px solid #D9D2C3;background:#fff;color:#1F2A27;
+  border-radius:10px;padding:7px 11px;cursor:pointer}
+.bar button:hover{border-color:#0F5C5A;color:#0F5C5A}
+.hint{position:absolute;left:12px;bottom:8px;font-size:12px;color:#5E6B66}
+text{font-family:'Be Vietnam Pro',system-ui,sans-serif;font-size:14px;font-weight:500}
+</style></head><body><div id="wrap"><div class="bar"><button id="ex">Mở tất cả</button><button id="co">Thu gọn</button>
+<button id="fit">Vừa khung</button></div><svg id="mm"></svg>
+<div class="hint">Bấm vào ô để mở/thu nhánh · kéo để di chuyển · lăn chuột hoặc chụm 2 ngón để phóng to</div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<script>
+const DATA = __DATA__;
+const PAL = ["#0F5C5A","#B4531F","#4F6D3A","#8A6A12","#2F5D8C","#8A3B4E"];
+function start(){
+  const svg = d3.select("#mm"), H = __H__;
+  const g = svg.append("g"), gl = g.append("g").attr("fill","none").attr("stroke-width",1.8), gn = g.append("g");
+  const zoom = d3.zoom().scaleExtent([0.25, 2.5]).on("zoom", e => g.attr("transform", e.transform));
+  svg.call(zoom).on("dblclick.zoom", null);
+  const root = d3.hierarchy(DATA, d => d.con && d.con.length ? d.con : null);
+  // đo bề rộng chữ thật (đủ dấu tiếng Việt) để ô chữ không bị cắt
+  const meas = svg.append("text").attr("opacity", 0);
+  let id = 0;
+  const every = root.descendants();  // lấy hết trước, vì vòng lặp dưới sẽ thu gọn các nhánh sâu
+  every.forEach(d => {
+    d.id = id++;
+    const top = d.depth ? d.ancestors().slice(-2)[0] : d;  // nhánh cấp 1 chứa nút này
+    d.color = d.depth === 0 ? "#1F2A27" : PAL[root.children.indexOf(top) % PAL.length];
+    meas.style("font-size", d.depth === 0 ? "16px" : "14px").style("font-weight", d.depth < 2 ? 600 : 500).text(d.data.ten || "?");
+    d.w = meas.node().getComputedTextLength() + 26 + (d.children ? 18 : 0);
+    d._children = d.children;
+    if (d.depth >= 2) d.children = null;
+  });
+  meas.remove();
+  const maxW = []; every.forEach(d => { maxW[d.depth] = Math.max(maxW[d.depth] || 0, d.w); });
+  const off = [0]; for (let i = 1; i < maxW.length; i++) off[i] = off[i - 1] + maxW[i - 1] + 48;
+  const tree = d3.tree().nodeSize([40, 1]).separation((a, b) => a.parent === b.parent ? 1 : 1.3);
+  const link = d3.linkHorizontal().x(p => p.y).y(p => p.x);
+  root.x0 = 0; root.y0 = 0;
+  function update(src){
+    tree(root);
+    root.each(d => { d.y = off[d.depth]; });
+    const nodes = root.descendants(), links = root.links(), t = svg.transition().duration(320);
+    const node = gn.selectAll("g.n").data(nodes, d => d.id);
+    const en = node.enter().append("g").attr("class", "n").attr("transform", `translate(${src.y0},${src.x0})`)
+      .attr("opacity", 0).style("cursor", d => d._children ? "pointer" : "default")
+      .on("click", (e, d) => { if (d._children) { d.children = d.children ? null : d._children; update(d); } });
+    en.append("rect").attr("y", -15).attr("height", 30).attr("rx", 10).attr("width", d => d.w)
+      .attr("fill", d => d.depth < 2 ? d.color : d.color + "1F").attr("stroke", d => d.depth < 2 ? "none" : d.color)
+      .attr("stroke-width", 1.2);
+    en.append("text").attr("x", 13).attr("dy", "0.35em").attr("fill", d => d.depth < 2 ? "#fff" : "#1F2A27")
+      .style("font-size", d => d.depth === 0 ? "16px" : "14px").style("font-weight", d => d.depth < 2 ? 600 : 500)
+      .text(d => d.data.ten || "?");
+    en.filter(d => d._children).append("text").attr("class", "tg").attr("x", d => d.w - 17).attr("dy", "0.35em")
+      .attr("fill", d => d.depth < 2 ? "#fff" : d.color).style("font-weight", 700);
+    const all = en.merge(node);
+    all.select("text.tg").text(d => d.children ? "−" : "+");
+    all.transition(t).attr("transform", d => `translate(${d.y},${d.x})`).attr("opacity", 1);
+    node.exit().transition(t).attr("transform", `translate(${src.y},${src.x})`).attr("opacity", 0).remove();
+    const lk = gl.selectAll("path").data(links, d => d.target.id);
+    const o = {x: src.x0, y: src.y0 + (src.w || 0)};
+    const le = lk.enter().append("path").attr("stroke", d => d.target.color).attr("stroke-opacity", .55)
+      .attr("d", () => link({source: o, target: o}));
+    le.merge(lk).transition(t).attr("d", d => link({source: {x: d.source.x, y: d.source.y + d.source.w}, target: {x: d.target.x, y: d.target.y}}));
+    lk.exit().transition(t).attr("d", () => { const p = {x: src.x, y: src.y + (src.w || 0)}; return link({source: p, target: p}); }).remove();
+    root.each(d => { d.x0 = d.x; d.y0 = d.y; });
+  }
+  function fit(){
+    const b = g.node().getBBox(), W = svg.node().clientWidth || 800;
+    if (!b.width) return;
+    const k = Math.min(1.4, 0.92 * Math.min(W / b.width, H / b.height));
+    svg.transition().duration(350).call(zoom.transform,
+      d3.zoomIdentity.translate(W / 2 - k * (b.x + b.width / 2), H / 2 - k * (b.y + b.height / 2)).scale(k));
+  }
+  update(root); setTimeout(fit, 380);
+  d3.select("#ex").on("click", () => { root.each(d => { if (d._children) d.children = d._children; }); update(root); setTimeout(fit, 380); });
+  d3.select("#co").on("click", () => { root.each(d => { if (d.depth >= 1 && d._children) d.children = null; }); update(root); setTimeout(fit, 380); });
+  d3.select("#fit").on("click", fit);
+}
+(document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve()).then(start);
+</script></body></html>"""
 
-    def lab(s):
-        return "\\n".join(textwrap.wrap(re.sub(r'["\\]', "", str(s)), 22)) or "?"
 
-    def walk(n, parent, color, depth):
-        if cnt[0] >= 70 or not isinstance(n, dict):
-            return
-        cnt[0] += 1
-        me = f"n{cnt[0]}"
-        if depth == 0:
-            out.append(f'{me}[label="{lab(n.get("ten"))}",fillcolor="#1F2A27",fontcolor="white",fontsize=16];')
-        elif depth == 1:
-            out.append(f'{me}[label="{lab(n.get("ten"))}",fillcolor="{color}",fontcolor="white"];')
-        else:
-            out.append(f'{me}[label="{lab(n.get("ten"))}",fillcolor="{color}26",fontcolor="#1F2A27"];')
-        if parent:
-            out.append(f'{parent}->{me}[color="{color}"];')
-        if depth < 3:
-            for j, ch in enumerate(n.get("con") or []):
-                walk(ch, me, pal[j % len(pal)] if depth == 0 else color, depth + 1)
-
-    walk(tree, None, pal[0], 0)
-    return "".join(out) + "}"
+def mindmap_html(tree, height=560):
+    data = json.dumps(tree, ensure_ascii=False).replace("</", "<\\/")
+    return MINDMAP_HTML.replace("__DATA__", data).replace("__H__", str(height))
 
 
 def outline(n, d=0):
@@ -1256,13 +1451,10 @@ def map_block(wf, R, topic):
         ai_button(R, "map", "Vẽ sơ đồ tư duy", ":material/account_tree:", run, primary=False)
     t = R.get("map")
     if t:
-        try:
-            st.graphviz_chart(to_dot(t))
-        except Exception:
-            st.info("Không hiển thị được dạng sơ đồ trên thiết bị này, xem dạng danh sách bên dưới.")
+        components.html(mindmap_html(t), height=572)
         with st.expander("Dạng danh sách (dễ đọc trên điện thoại)"):
             st.markdown(outline(t))
-        st.download_button("Tải sơ đồ (.md)", outline(t), file_name="so_do_tu_duy.md", mime="text/markdown",
+        half().download_button("Tải sơ đồ (.md)", outline(t), file_name="so_do_tu_duy.md", mime="text/markdown",
                            icon=":material/download:", key=f"dl_{R['id']}_map")
 
 
@@ -1279,8 +1471,8 @@ def page_learn(wf):
                       lambda: ask_cached(SYS_C1, q, max_tokens=1400))
             if R.get("c1"):
                 result_box("Tiếp cận khái niệm", R["c1"])
-                st.text_area("Ghi lại dự đoán của bạn (không bắt buộc, chỉ lưu trong phiên)", key=f"w{R['id']}_guess",
-                             height=90, max_chars=1500)
+                math_area("Ghi lại dự đoán của bạn (không bắt buộc, chỉ lưu trong phiên)", f"w{R['id']}_guess",
+                          height=90, max_chars=1500)
         elif cur == 2:
             ai_button(R, "c2", "Xem thẻ khái niệm", ":material/style:", lambda: ask_cached(SYS_C2, q, max_tokens=1800))
             if R.get("c2"):
@@ -1296,10 +1488,10 @@ def page_learn(wf):
             a, b = st.columns(2)
             with a:
                 ai_button(R, "t1", "Tính thử và dự đoán", ":material/science:",
-                          lambda: ask_cached(SYS_T1, q, max_tokens=1400))
+                          lambda: ask_cached(SYS_T1, q, max_tokens=1400), solo=False)
             with b:
                 ai_button(R, "t2", "Xem phát biểu định lí", ":material/gavel:",
-                          lambda: ask_cached(SYS_T2, q, max_tokens=1800), primary=bool(R.get("t1")))
+                          lambda: ask_cached(SYS_T2, q, max_tokens=1800), primary=bool(R.get("t1")), solo=False)
             if R.get("t1"):
                 result_box("Tiếp cận định lí", R["t1"])
             if R.get("t2"):
@@ -1309,17 +1501,16 @@ def page_learn(wf):
             a, b = st.columns(2)
             with a:
                 ai_button(R, "t3h", "Gợi mở chứng minh", ":material/psychology:",
-                          lambda: ask_cached(SYS_T3_HINT, q, max_tokens=1500, think="medium"))
+                          lambda: ask_cached(SYS_T3_HINT, q, max_tokens=1500, think="medium"), solo=False)
             with b:
                 ai_button(R, "t3f", "Xem chứng minh đầy đủ", ":material/menu_book:",
-                          lambda: ask_cached(SYS_T3_FULL, q, max_tokens=2500, think="medium"), primary=False)
+                          lambda: ask_cached(SYS_T3_FULL, q, max_tokens=2500, think="medium"), primary=False, solo=False)
             if R.get("t3h"):
                 result_box("Hướng dẫn chứng minh", R["t3h"])
             if R.get("t3f"):
                 with st.expander("Chứng minh đầy đủ", expanded=True):
                     st.markdown(R["t3f"])
-            st.text_area("Tự viết chứng minh của bạn (nháp, chỉ lưu trong phiên)", key=f"w{R['id']}_proof",
-                         height=120, max_chars=4000)
+            math_area("Tự viết chứng minh của bạn (nháp, chỉ lưu trong phiên)", f"w{R['id']}_proof", height=120)
         elif cur == 3:
             oral_block(wf, R, topic)
         else:
@@ -1342,8 +1533,9 @@ def page_solve():
     with st.container(border=True):
         sec("Đề bài")
         a, b = st.columns([1.5, 1], gap="large")
-        prob = a.text_area("Nhập đề bài", key="s_prob", height=140, max_chars=4000, label_visibility="collapsed",
-                           placeholder="Ví dụ: Một hộp có 5 bi đỏ và 3 bi xanh. Lấy ngẫu nhiên 2 bi...")
+        with a:
+            prob = math_area("Nhập đề bài", "s_prob", height=140, collapsed=True,
+                             placeholder="Ví dụ: Một hộp có 5 bi đỏ và 3 bi xanh. Lấy ngẫu nhiên 2 bi...")
         pf = b.file_uploader("Hoặc tải ảnh/PDF đề bài", type=ftypes, accept_multiple_files=True,
                              key=f"s_pf{S.get('s_pfn', 0)}")
     sig = hashlib.sha1((prob.strip() + "|" + "|".join(f"{f.name}{f.size}" for f in pf or [])).encode()).hexdigest()
@@ -1362,13 +1554,13 @@ def page_solve():
     if cur == 1:
         st.markdown("Tự trả lời trước: **Đề cho gì? Hỏi gì? Kí hiệu các biến cố, đại lượng thế nào?** "
                     "Sau đó đối chiếu với phần phân tích của AI.")
-        st.text_area("Phân tích của bạn (nháp)", key=f"w{R['id']}_s1", height=100, max_chars=2000)
+        math_area("Phân tích của bạn (nháp)", f"w{R['id']}_s1", height=100, max_chars=2000)
         ai_button(R, "s1", "Phân tích đề cùng AI", ":material/search:",
                   lambda: ask_cached(SYS_S1, build(prob, pf), max_tokens=1400))
         if R.get("s1"):
             result_box("Tìm hiểu đề", R["s1"])
     elif cur == 2:
-        st.text_area("Dàn ý lời giải của bạn (nháp)", key=f"w{R['id']}_s2", height=100, max_chars=2000)
+        math_area("Dàn ý lời giải của bạn (nháp)", f"w{R['id']}_s2", height=100, max_chars=2000)
         ai_button(R, "s2", "Gợi ý chiến lược giải", ":material/lightbulb:",
                   lambda: ask_cached(SYS_HINT, build(prob, pf), max_tokens=1800, think="medium"))
         if R.get("s2"):
@@ -1377,10 +1569,11 @@ def page_solve():
         with st.container(border=True):
             sec("Bài làm của bạn")
             a, b = st.columns([1.5, 1], gap="large")
-            wt = a.text_area("Gõ bài làm", key=f"w{R['id']}_wt", height=170, max_chars=4000)
+            with a:
+                wt = math_area("Gõ bài làm", f"w{R['id']}_wt", height=170)
             wf_ = b.file_uploader("Hoặc tải ảnh chụp/PDF bài làm", type=ftypes, accept_multiple_files=True,
                                   key=f"w{R['id']}_wf")
-            if st.button("Chấm bài", icon=":material/task_alt:", type="primary", key=f"b_{R['id']}_grade"):
+            if half().button("Chấm bài", icon=":material/task_alt:", type="primary", key=f"b_{R['id']}_grade"):
                 if not (wt.strip() or wf_):
                     st.warning("Hãy gõ hoặc tải bài làm của bạn.")
                 else:
@@ -1396,15 +1589,21 @@ def page_solve():
                 show_grade(R["grade"])
                 st.caption("Sửa bài theo nhận xét rồi chấm lại, hoặc sang bước 4 để đối chiếu và mở rộng.")
     else:
-        a, b = st.columns(2)
+        a, b, c = st.columns(3)
+        with c:
+            ai_button(R, "casio", "Bấm máy fx-580VN X", ":material/calculate:",
+                      lambda: ask_cached(SYS_CASIO, build(prob, pf), max_tokens=2000, think="medium"),
+                      primary=False, solo=False)
         with a:
             ai_button(R, "sol", "Bài giải chi tiết và nhìn lại", ":material/menu_book:",
-                      lambda: ask_cached(SYS_SOL, build(prob, pf), max_tokens=3500, think="medium"), primary=False)
+                      lambda: ask_cached(SYS_SOL, build(prob, pf), max_tokens=3500, think="medium"), primary=False, solo=False)
         with b:
             ai_button(R, "sim", "Tạo bài tập tương tự", ":material/library_add:",
-                      lambda: ask_json(SYS_SIMILAR, build(prob, pf), max_tokens=4500, think="medium"))
+                      lambda: ask_json(SYS_SIMILAR, build(prob, pf), max_tokens=4500, think="medium"), solo=False)
         if R.get("sol"):
             result_box("Bài giải chi tiết", R["sol"])
+        if R.get("casio"):
+            result_box("Bấm máy Casio fx-580VN X cho bài này", R["casio"])
         sim = R.get("sim")
         if sim:
             items = [x for x in (sim.get("bai") or []) if isinstance(x, dict) and x.get("de")][:3]
@@ -1412,7 +1611,7 @@ def page_solve():
             for i, x in enumerate(items):
                 k = f"w{R['id']}_sim{i}"
                 with st.container(border=True):
-                    st.markdown(f"**Bài {i + 1}** · *{x.get('muc_do', '')}*\n\n{x['de']}")
+                    st.markdown(f"**Bài {i + 1}** · *{x.get('muc_do', '')}*\n\n{mathify(x['de'])}")
                     c1, c2, c3 = st.columns(3)
                     c1.button("Luyện theo 4 bước", icon=":material/play_arrow:", type="primary", key=f"b_{k}_go",
                               on_click=load_problem, args=(x["de"],))
@@ -1463,6 +1662,7 @@ def login():
 
 def footer():
     src = _key_and_source()[1]
+    disclaimer()
     st.markdown(
         '<div class="foot"><span>XSTK Tutor · Học khái niệm · Học định lí · Giải toán 4 bước</span>'
         f'<span>{"AI sẵn sàng (" + src + ")" if src else "AI chưa được cấu hình"}</span></div>',
@@ -1477,9 +1677,11 @@ def main():
         login()
         footer()
         return
-    a, b, c = st.columns([5, 1.7, 1.4], vertical_alignment="center")
+    a, d, b, c = st.columns([3.6, 1.7, 1.7, 1.4], vertical_alignment="center")
     with a:
         brand()
+    if d.button("Máy tính Casio", icon=":material/calculate:", key="b_casio"):
+        casio_dialog()
     if b.button("Hồ sơ học tập", icon=":material/insights:", type="primary", key="b_prof"):
         profile_dialog()
     with c.popover(S.user, icon=":material/account_circle:"):
