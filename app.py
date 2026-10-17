@@ -1,12 +1,17 @@
 """
-XSTK Tutor - trợ lí AI học Xác suất thống kê (Streamlit).
+XSTK Tutor - trợ giảng AI học Xác suất thống kê theo 3 quy trình 4 bước (Streamlit).
 Chạy thử : streamlit run app.py
 Triển khai: Streamlit Community Cloud, Main file path = app.py
+
+API key (GEMINI_API_KEY) được tìm theo thứ tự:
+  1. Biến môi trường GEMINI_API_KEY (GitHub Secrets: Codespaces / Actions / máy chủ tự dựng đưa vào dưới dạng biến môi trường)
+  2. Streamlit Community Cloud > App settings > Secrets
 """
 import copy
 import hashlib
 import io
 import json
+import os
 import random
 import re
 import textwrap
@@ -25,10 +30,7 @@ from PIL import Image, ImageOps
 
 # ───────────────────────── CẤU HÌNH ─────────────────────────
 MODEL = "gemini-3.5-flash-lite"
-# Cách 1 (khuyên dùng): đặt GEMINI_API_KEY trong Streamlit Cloud > Settings > Secrets.
-# Cách 2: dán khóa (dạng AIza...) vào dòng dưới. Chỉ làm vậy khi repo GitHub ở chế độ PRIVATE:
-# khóa nằm trong repo public sẽ bị lộ và bị thu hồi.
-EMBEDDED_KEY = "DAN_API_KEY_VAO_DAY"
+KEY_NAME = "GEMINI_API_KEY"
 
 # ── Hạn mức gói free của AI Studio cho Gemini 3.5 Flash Lite: RPM 15 · TPM 250k · RPD 500.
 # Ngưỡng dưới đây đặt thấp hơn hạn mức thật để chừa biên an toàn (đồng hồ Google lệch, app khác dùng chung key).
@@ -39,22 +41,40 @@ USER_DAILY = 30         # lượt AI tối đa mỗi người mỗi ngày
 IP_DAILY = 90           # lượt AI tối đa mỗi địa chỉ mạng mỗi ngày (cả lớp có thể dùng chung wifi)
 QUEUE_MAX = 40          # giây tối đa một yêu cầu chịu xếp hàng trước khi báo bận
 CACHE_TTL = 24 * 3600   # bộ nhớ chung giữ kết quả 24 giờ
-POOL_SIZE = 3           # mỗi (chủ đề, mức độ) chỉ sinh tối đa 3 bộ đề, người sau dùng lại
+POOL_SIZE = 3           # mỗi (loại, quy trình, chủ đề, mức độ) chỉ sinh tối đa 3 bộ đề, người sau dùng lại
 HEAD = {"minimal": 0, "medium": 6000, "high": 12000}  # chỗ chừa cho token "suy nghĩ" (tính vào max_output_tokens)
 PROFILE_DIR = Path("profiles")  # shortcut: đĩa của Streamlit Cloud bị xoá khi app khởi động lại, nên có nút tải/khôi phục hồ sơ
 
-TOPICS = [
-    "Biến cố và xác suất cổ điển",
-    "Xác suất có điều kiện, công thức nhân",
-    "Công thức xác suất toàn phần và Bayes",
-    "Biến ngẫu nhiên rời rạc, kì vọng, phương sai",
-    "Phân phối nhị thức",
-    "Phân phối Poisson",
-    "Biến ngẫu nhiên liên tục, phân phối chuẩn",
-    "Số đặc trưng của mẫu số liệu ghép nhóm",
-    "Ước lượng khoảng",
-    "Kiểm định giả thuyết",
-    "Tương quan và hồi quy tuyến tính",
+CONCEPTS = [
+    "Phép thử, không gian mẫu và biến cố",
+    "Xác suất của biến cố (cổ điển, thống kê)",
+    "Biến cố xung khắc, biến cố đối",
+    "Xác suất có điều kiện",
+    "Biến cố độc lập",
+    "Biến ngẫu nhiên rời rạc, bảng phân phối",
+    "Kì vọng (giá trị trung bình)",
+    "Phương sai và độ lệch chuẩn",
+    "Biến ngẫu nhiên liên tục, hàm mật độ",
+    "Phân phối chuẩn",
+    "Tổng thể, mẫu và số đặc trưng mẫu",
+    "Khoảng tin cậy",
+    "Giả thuyết thống kê, mức ý nghĩa, p-giá trị",
+    "Hệ số tương quan",
+]
+THEOREMS = [
+    "Quy tắc cộng xác suất",
+    "Quy tắc nhân xác suất",
+    "Công thức xác suất toàn phần",
+    "Công thức Bayes",
+    "Công thức Bernoulli (phân phối nhị thức)",
+    "Tính chất của kì vọng và phương sai",
+    "Phân phối Poisson và xấp xỉ nhị thức",
+    "Chuẩn hoá phân phối chuẩn, quy tắc 3 sigma",
+    "Luật số lớn",
+    "Định lí giới hạn trung tâm",
+    "Khoảng tin cậy cho trung bình và tỉ lệ",
+    "Kiểm định giả thuyết về trung bình",
+    "Phương trình hồi quy tuyến tính (bình phương tối thiểu)",
 ]
 ERR = [
     "Hiểu sai khái niệm", "Áp dụng sai công thức", "Sai tính toán",
@@ -62,9 +82,59 @@ ERR = [
     "Trình bày thiếu chặt chẽ", "Khác",
 ]
 
+# Ba quy trình, mỗi quy trình 4 bước: (tên bước, mục tiêu, việc học sinh cần làm)
+WF = {
+    "concept": {
+        "name": "Học khái niệm", "icon": ":material/lightbulb:", "kind": "Khái niệm", "topics": CONCEPTS,
+        "pick": "Khái niệm cần học",
+        "desc": "Từ tình huống quen thuộc đến định nghĩa chính xác, củng cố bằng vấn đáp rồi vận dụng vào bài tập.",
+        "steps": [
+            ("Tiếp cận", "Gặp khái niệm qua tình huống thực tế, tự nhận ra dấu hiệu chung.",
+             "Đọc tình huống, trả lời các câu hỏi dự đoán trước khi xem định nghĩa."),
+            ("Hình thành", "Nắm định nghĩa, dấu hiệu bản chất, kí hiệu và phân biệt với khái niệm dễ nhầm.",
+             "Đọc thẻ khái niệm, sau đó tự phát biểu lại bằng lời của bạn để AI nhận xét."),
+            ("Củng cố", "Vấn đáp 5 câu: định nghĩa, phân biệt, ví dụ và phản ví dụ, liên hệ, vận dụng.",
+             "Trả lời từng câu của giám khảo AI, cuối buổi nhận điểm và lỗ hổng kiến thức."),
+            ("Vận dụng", "Luyện bài tập trắc nghiệm, tự luận và hệ thống hoá bằng sơ đồ tư duy.",
+             "Tạo bài tập theo mức độ, tự làm rồi chấm; vẽ sơ đồ tư duy để tổng kết."),
+        ],
+    },
+    "theorem": {
+        "name": "Học định lí", "icon": ":material/function:", "kind": "Định lí, công thức", "topics": THEOREMS,
+        "pick": "Định lí, công thức cần học",
+        "desc": "Tính thử, dự đoán, phát biểu chính xác, hiểu chứng minh rồi củng cố và vận dụng.",
+        "steps": [
+            ("Tiếp cận, phát biểu", "Tính thử vài trường hợp cụ thể, dự đoán quy luật rồi phát biểu chính xác.",
+             "Làm phần tính thử, đọc phát biểu, chỉ ra giả thiết, kết luận và tự phát biểu lại."),
+            ("Chứng minh", "Hiểu ý tưởng và các luận cứ của chứng minh.",
+             "Đi theo các câu hỏi gợi mở để tự chứng minh, chỉ xem chứng minh đầy đủ khi cần."),
+            ("Củng cố", "Vấn đáp 5 câu: phát biểu, điều kiện, ý tưởng chứng minh, cấu trúc logic, vận dụng.",
+             "Trả lời từng câu của giám khảo AI, cuối buổi nhận điểm và lỗ hổng kiến thức."),
+            ("Vận dụng", "Áp dụng định lí vào bài tập và hệ thống hoá bằng sơ đồ tư duy.",
+             "Tạo bài tập theo mức độ, tự làm rồi chấm; vẽ sơ đồ tư duy để tổng kết."),
+        ],
+    },
+    "solve": {
+        "name": "Giải toán", "icon": ":material/calculate:", "kind": "Giải toán", "topics": [],
+        "desc": "Quy trình 4 bước của Pólya: tìm hiểu đề, lập chương trình giải, trình bày, kiểm tra và mở rộng.",
+        "steps": [
+            ("Tìm hiểu đề", "Phân biệt cái đã cho, cái phải tìm, kí hiệu hoá các đại lượng.",
+             "Tự đọc kĩ đề, gạch chân dữ kiện; dùng AI để đối chiếu phần phân tích của bạn."),
+            ("Lập chương trình giải", "Quy về bài toán quen thuộc, chọn kiến thức và chia nhỏ bài toán.",
+             "Xem gợi ý chiến lược (không có đáp án), tự lập dàn ý lời giải."),
+            ("Trình bày lời giải", "Viết lời giải chặt chẽ rồi để AI chấm điểm, chỉ ra chỗ sai.",
+             "Gõ hoặc chụp ảnh bài làm, bấm Chấm bài; sửa theo nhận xét rồi chấm lại."),
+            ("Kiểm tra, mở rộng", "Kiểm tra kết quả, rút ra phương pháp, luyện thêm bài tương tự.",
+             "Đối chiếu bài giải chi tiết, ghi lại phương pháp, tạo bài tương tự để luyện tiếp."),
+        ],
+    },
+}
+WF_LOG = {"concept": "Học khái niệm", "theorem": "Học định lí", "solve": "Giải toán",
+          "tutor": "Giải toán", "practice": "Luyện tập", "oral": "Vấn đáp"}  # tên cũ để đọc hồ sơ đã lưu
+
 # ───────────────────────── PROMPT ─────────────────────────
 BASE = (
-    "Bạn là gia sư Xác suất thống kê (XSTK) cho học sinh, sinh viên Việt Nam. "
+    "Bạn là trợ giảng Xác suất thống kê (XSTK) cho học sinh, sinh viên Việt Nam. "
     "Luôn trả lời bằng tiếng Việt, ngắn gọn, chính xác, thân thiện, không dùng emoji. "
     "Công thức toán viết bằng LaTeX: $...$ trong dòng, $$...$$ cho dòng riêng. "
 )
@@ -73,43 +143,50 @@ JSON_RULE = (
     r'Trong chuỗi JSON, mọi dấu gạch chéo ngược của LaTeX phải viết đôi (ví dụ "\\frac{1}{2}"). '
     r'Xuống dòng trong chuỗi dùng \n.'
 )
-SOLVE_FLOW = (
-    "Quy trình giải toán 4 bước: (1) Tìm hiểu đề: phân biệt cái đã cho, cái phải tìm, kí hiệu hoá; "
-    "(2) Xây dựng chương trình giải: quy về bài toán đơn giản quen thuộc, chọn kiến thức gần nhất; "
-    "(3) Trình bày lời giải; (4) Kiểm tra, nhìn lại, rút phương pháp, mở rộng. "
+ERR_RULE = 'Trường "loai" của loi_sai phải là một trong: ' + "; ".join(ERR) + "."
+
+# Học khái niệm
+SYS_C1 = BASE + (
+    "Bước 1 của quy trình học khái niệm: TIẾP CẬN. Giúp học sinh tự đi đến khái niệm, CHƯA nêu định nghĩa chính thức. "
+    "Trình bày dưới 320 từ, gồm các mục in đậm: **Tình huống** (một tình huống thực tế hoặc trò chơi gần gũi, có số liệu nhỏ, "
+    "làm nảy sinh nhu cầu cần khái niệm); **Ví dụ dẫn dắt** (2-3 ví dụ cụ thể có chung dấu hiệu bản chất); "
+    "**Câu hỏi dự đoán** (2-3 câu để học sinh tự khái quát dấu hiệu chung); **Vì sao cần khái niệm này** (1-2 câu)."
 )
-SYS_HINT = BASE + SOLVE_FLOW + (
-    "Nhiệm vụ: đưa CHIẾN LƯỢC giải bài theo các bước 1, 2 và gợi ý bước 4 (cách tự kiểm tra). "
-    "Nêu: cái đã cho, cái cần tìm, dạng bài, kiến thức/công thức cần dùng, cách chia nhỏ bài toán. "
-    "TUYỆT ĐỐI không đưa đáp án, không tính ra kết quả số, không thay số hoàn chỉnh vào công thức, "
-    "không viết lời giải từng bước. Kết thúc bằng 1-2 câu hỏi gợi mở để học sinh tự làm."
+SYS_C2 = BASE + (
+    "Bước 2 của quy trình học khái niệm: HÌNH THÀNH. Viết thẻ khái niệm dưới 450 từ, gồm các mục in đậm: "
+    "**Định nghĩa** (chính xác, đúng chương trình); **Dấu hiệu bản chất** (gạch đầu dòng); **Kí hiệu và thuật ngữ**; "
+    "**Ví dụ** (2 ví dụ, giải thích ngắn vì sao thoả định nghĩa); **Phản ví dụ** (2 trường hợp, chỉ rõ thiếu dấu hiệu nào); "
+    "**Dễ nhầm với** (khái niệm gần giống và điểm khác biệt); **Liên hệ** (khái niệm, định lí liên quan)."
 )
-SYS_SOL = BASE + SOLVE_FLOW + (
-    "Nhiệm vụ: viết BÀI GIẢI CHI TIẾT theo 4 bước, rõ ràng từng phép biến đổi, in đậm kết quả cuối, "
-    "cuối cùng nêu 1-2 sai lầm thường gặp của dạng bài này."
+# Học định lí
+SYS_T1 = BASE + (
+    "Bước tiếp cận của quy trình học định lí, công thức. CHƯA phát biểu định lí. Dưới 320 từ, các mục in đậm: "
+    "**Tình huống** (bài toán thực tế làm nảy sinh nhu cầu); **Tính thử** (2-3 trường hợp cụ thể với số liệu nhỏ, "
+    "để học sinh tự tính, KHÔNG ghi kết quả); **Dự đoán** (câu hỏi gợi ý học sinh phát hiện quy luật chung); "
+    "**Cách kiểm tra dự đoán** (1-2 câu)."
 )
-SYS_GRADE = BASE + (
-    "Bạn chấm bài làm XSTK của học sinh (có thể là ảnh chụp chữ viết tay hoặc PDF: hãy đọc/OCR cẩn thận). "
-    "Tự giải đề trước để biết kết quả đúng, nhưng CHỈ chấm điểm và chỉ ra chỗ sai: KHÔNG viết lại lời giải đúng, "
-    "KHÔNG nêu kết quả cuối cùng đúng. Với mỗi lỗi, nói sai ở bước nào, vì sao, và gợi hướng sửa bằng một câu hỏi "
-    "hoặc nhắc kiến thức. Chấm thang 10, ghi nhận phần đúng. Nếu không đọc được bài làm thì diem = 0 và nói rõ. "
-    'Trường "loai" của loi_sai phải là một trong: ' + "; ".join(ERR) + "." + JSON_RULE +
-    ' Cấu trúc: {"van_ban_chep_lai":"nội dung bài làm đọc được", "diem":số, "nhan_xet":"2-4 câu", '
-    '"buoc":[{"ten":"...","dung":true,"ghi_chu":"..."}], "loi_sai":[{"loai":"...","mo_ta":"..."}], '
-    '"lo_hong":["kiến thức còn thiếu"], "chu_de":"tên chủ đề ngắn"}'
+SYS_T2 = BASE + (
+    "Bước phát biểu của quy trình học định lí, công thức. Dưới 420 từ, các mục in đậm: **Phát biểu** (chính xác, có công thức); "
+    "**Giả thiết**; **Kết luận**; **Điều kiện áp dụng** (khi nào KHÔNG được dùng); **Ý nghĩa các đại lượng**; "
+    "**Trường hợp đặc biệt, hệ quả**; **Mệnh đề đảo** (đúng hay sai, vì sao); **Sai lầm hay gặp khi áp dụng**."
 )
-_PRACTICE = (
-    "Soạn bài tập XSTK bám sát chương trình, số liệu cụ thể, đủ dữ kiện, giải được, có lời giải đúng. "
+SYS_T3_HINT = BASE + (
+    "Bước chứng minh của quy trình học định lí, dạy theo kiểu gợi mở. Nêu **Ý tưởng chính** (1-2 câu), "
+    "**Luận cứ cần dùng** (định nghĩa, tính chất, định lí đã biết), rồi **Các bước** (3-5 bước nhỏ, mỗi bước là một câu hỏi "
+    "gợi ý để học sinh tự làm). TUYỆT ĐỐI không viết chứng minh hoàn chỉnh. Nếu chứng minh chặt chẽ vượt chương trình, "
+    "hãy nói rõ và hướng dẫn một lập luận trực quan hoặc kiểm chứng bằng ví dụ."
 )
-SYS_PRACTICE = BASE + _PRACTICE + (
-    "Soạn MỘT bộ gồm đúng 5 câu trắc nghiệm và 5 câu tự luận. Trắc nghiệm: 4 phương án, trộn nhận diện khái niệm và vận dụng, "
-    "phương án nhiễu phản ánh sai lầm phổ biến, vị trí đáp án đúng phân bố ngẫu nhiên giữa A-D, 'sai_lam' chỉ gồm các phương án sai. "
-    "Tự luận: 2 cơ bản, 2 trung bình, 1 gắn thực tiễn, 'tieu_chi' là thang điểm 10 tham khảo. 'chien_luoc' của mọi câu theo bước 1-2 "
-    "của quy trình giải, TUYỆT ĐỐI không tiết lộ đáp án hay kết quả số. Kiểm tra kĩ đáp án trước khi trả lời." + JSON_RULE +
-    ' Cấu trúc: {"trac_nghiem":[{"de":"...","lua_chon":{"A":"..","B":"..","C":"..","D":".."},"dap_an":"B",'
-    '"chien_luoc":"...","loi_giai":"lời giải chi tiết nêu rõ đáp án","sai_lam":{"A":{"loai":"(một trong: '
-    + "; ".join(ERR) + ')","mo_ta":"vì sao học sinh hay chọn nhầm"}}}],'
-    '"tu_luan":[{"de":"...","chien_luoc":"...","loi_giai":"lời giải chi tiết 4 bước","tieu_chi":"..."}]}'
+SYS_T3_FULL = BASE + (
+    "Viết chứng minh đầy đủ, chặt chẽ cho định lí hoặc công thức XSTK được hỏi, đánh số từng bước và ghi rõ luận cứ của mỗi bước. "
+    "Nếu chứng minh chặt chẽ vượt chương trình, trình bày chứng minh cho trường hợp riêng hoặc lập luận trực quan và nói rõ điều đó. "
+    "Cuối cùng nêu **Điều rút ra** về phương pháp chứng minh."
+)
+SYS_SELF = BASE + (
+    "Học sinh tự phát biểu lại một định nghĩa hoặc định lí XSTK bằng lời của mình. Đánh giá độ chính xác, độ đầy đủ "
+    "(có thiếu dấu hiệu bản chất, giả thiết hay điều kiện nào không), cách dùng thuật ngữ. Ghi nhận phần đúng. "
+    "Không chép lại nguyên văn định nghĩa chuẩn, chỉ chỉ ra phần cần sửa. " + ERR_RULE + JSON_RULE +
+    ' Cấu trúc: {"diem":số 0-10,"nhan_xet":"2-4 câu","loi_sai":[{"loai":"...","mo_ta":"..."}],'
+    '"lo_hong":["..."],"chu_de":"tên chủ đề ngắn"}'
 )
 ORAL_CONCEPT = (
     "Thứ tự 5 câu hỏi (học khái niệm): (1) phát biểu định nghĩa và dấu hiệu bản chất; (2) thuật ngữ, kí hiệu then chốt "
@@ -123,10 +200,30 @@ ORAL_THEOREM = (
 )
 SYS_ORAL_GRADE = BASE + (
     "Chấm phần vấn đáp lí thuyết XSTK dựa trên bản ghi. Câu chưa trả lời hoặc trả lời sai hoàn toàn tính 0. "
-    "Chỉ ra lỗ hổng kiến thức và sai lầm cụ thể của học sinh. " 'Trường "loai" của loi_sai là một trong: '
-    + "; ".join(ERR) + "." + JSON_RULE +
+    "Chỉ ra lỗ hổng kiến thức và sai lầm cụ thể của học sinh. " + ERR_RULE + JSON_RULE +
     ' Cấu trúc: {"diem":số 0-10,"nhan_xet":"2-4 câu","tung_cau":[{"cau":"tóm tắt câu hỏi","diem":số,"nhan_xet":"..."}],'
     '"loi_sai":[{"loai":"...","mo_ta":"..."}],"lo_hong":["..."],"goi_y_on_tap":["..."],"chu_de":"tên chủ đề"}'
+)
+FOCUS = {
+    "concept": "Bài tập phục vụ củng cố và vận dụng KHÁI NIỆM: nhận dạng qua ví dụ và phản ví dụ, thể hiện khái niệm, "
+               "phân biệt với khái niệm dễ nhầm, vận dụng vào tình huống thực tế. ",
+    "theorem": "Bài tập phục vụ vận dụng ĐỊNH LÍ, CÔNG THỨC: kiểm tra điều kiện áp dụng, áp dụng trực tiếp, "
+               "kết hợp với kiến thức khác, tình huống thực tế. ",
+}
+_PRACTICE = "Soạn bài tập XSTK bám sát chương trình, số liệu cụ thể, đủ dữ kiện, giải được, có lời giải đúng. "
+SYS_MC = BASE + _PRACTICE + (
+    "Soạn đúng 5 câu trắc nghiệm, 4 phương án, phương án nhiễu phản ánh sai lầm phổ biến, vị trí đáp án đúng phân bố ngẫu nhiên "
+    "giữa A-D, 'sai_lam' chỉ gồm các phương án sai. 'chien_luoc' theo bước 1-2 của quy trình giải, TUYỆT ĐỐI không tiết lộ "
+    "đáp án hay kết quả số. Kiểm tra kĩ đáp án trước khi trả lời." + JSON_RULE +
+    ' Cấu trúc: {"cau":[{"de":"...","lua_chon":{"A":"..","B":"..","C":"..","D":".."},"dap_an":"B",'
+    '"chien_luoc":"...","loi_giai":"lời giải chi tiết nêu rõ đáp án","sai_lam":{"A":{"loai":"(một trong: '
+    + "; ".join(ERR) + ')","mo_ta":"vì sao học sinh hay chọn nhầm"}}}]}'
+)
+SYS_ES = BASE + _PRACTICE + (
+    "Soạn đúng 5 câu tự luận: 2 câu cơ bản, 2 câu trung bình, 1 câu gắn thực tiễn (độ khó tổng thể theo mức độ được yêu cầu). "
+    "'tieu_chi' là thang điểm 10 tham khảo. 'chien_luoc' theo bước 1-2 của quy trình giải, TUYỆT ĐỐI không tiết lộ đáp án "
+    "hay kết quả số. Kiểm tra kĩ lời giải." + JSON_RULE +
+    ' Cấu trúc: {"cau":[{"de":"...","chien_luoc":"...","loi_giai":"lời giải chi tiết 4 bước","tieu_chi":"..."}]}'
 )
 SYS_MAP = BASE + (
     "Tạo bản đồ tư duy cho một chủ đề XSTK. Gốc là tên chủ đề. 5-6 nhánh cấp 1 (ví dụ: Khái niệm; Công thức và tính chất; "
@@ -134,11 +231,51 @@ SYS_MAP = BASE + (
     "có thể thêm cấp 3. Tên nút tối đa 8 từ, văn bản thuần, không LaTeX, không dấu nháy." + JSON_RULE +
     ' Cấu trúc: {"ten":"gốc","con":[{"ten":"...","con":[{"ten":"..."}]}]}'
 )
+# Giải toán
+SOLVE_FLOW = (
+    "Quy trình giải toán 4 bước: (1) Tìm hiểu đề: phân biệt cái đã cho, cái phải tìm, kí hiệu hoá; "
+    "(2) Xây dựng chương trình giải: quy về bài toán đơn giản quen thuộc, chọn kiến thức gần nhất; "
+    "(3) Trình bày lời giải; (4) Kiểm tra, nhìn lại, rút phương pháp, mở rộng. "
+)
+SYS_S1 = BASE + SOLVE_FLOW + (
+    "Chỉ làm BƯỚC 1 - Tìm hiểu đề. Các mục in đậm: **Tóm tắt đề** (1-2 câu); **Cái đã cho** (kí hiệu hoá: biến cố, biến ngẫu nhiên, "
+    "tham số); **Cái phải tìm** (viết dưới dạng kí hiệu, ví dụ $P(A|B)$); **Điều kiện, ràng buộc ngầm**; **Dạng bài**; "
+    "**Gợi ý biểu diễn** (sơ đồ cây, bảng, trục số... nếu phù hợp). TUYỆT ĐỐI không giải, không tính kết quả."
+)
+SYS_HINT = BASE + SOLVE_FLOW + (
+    "Chỉ làm BƯỚC 2 - Xây dựng chương trình giải. Nêu: bài toán quen thuộc có thể quy về, kiến thức/công thức cần dùng "
+    "và vì sao chọn nó, cách chia bài toán thành các bài toán nhỏ theo thứ tự, điểm dễ sai. "
+    "TUYỆT ĐỐI không đưa đáp án, không tính ra kết quả số, không thay số hoàn chỉnh vào công thức, "
+    "không viết lời giải từng bước. Kết thúc bằng 1-2 câu hỏi gợi mở để học sinh tự làm."
+)
+SYS_GRADE = BASE + (
+    "Bạn chấm bài làm XSTK của học sinh (có thể là ảnh chụp chữ viết tay hoặc PDF: hãy đọc/OCR cẩn thận). "
+    "Tự giải đề trước để biết kết quả đúng, nhưng CHỈ chấm điểm và chỉ ra chỗ sai: KHÔNG viết lại lời giải đúng, "
+    "KHÔNG nêu kết quả cuối cùng đúng. Với mỗi lỗi, nói sai ở bước nào, vì sao, và gợi hướng sửa bằng một câu hỏi "
+    "hoặc nhắc kiến thức. Chấm thang 10, ghi nhận phần đúng. Nếu không đọc được bài làm thì diem = 0 và nói rõ. "
+    + ERR_RULE + JSON_RULE +
+    ' Cấu trúc: {"van_ban_chep_lai":"nội dung bài làm đọc được", "diem":số, "nhan_xet":"2-4 câu", '
+    '"buoc":[{"ten":"...","dung":true,"ghi_chu":"..."}], "loi_sai":[{"loai":"...","mo_ta":"..."}], '
+    '"lo_hong":["kiến thức còn thiếu"], "chu_de":"tên chủ đề ngắn"}'
+)
+SYS_SOL = BASE + SOLVE_FLOW + (
+    "Viết BÀI GIẢI CHI TIẾT theo 4 bước, rõ ràng từng phép biến đổi, in đậm kết quả cuối. Sau đó thêm mục **Nhìn lại**: "
+    "cách tự kiểm tra kết quả (ước lượng, trường hợp đặc biệt, điều kiện $0 \\le P \\le 1$...), **Phương pháp rút ra** cho dạng bài, "
+    "**Mở rộng** (một hướng thay đổi đề), và 1-2 **Sai lầm thường gặp**."
+)
+SYS_SIMILAR = BASE + SOLVE_FLOW + (
+    "Từ đề bài gốc, soạn đúng 3 bài tập tương tự để học sinh luyện thêm: bài 1 cùng dạng, đổi số liệu và bối cảnh; "
+    "bài 2 cùng phương pháp nhưng đổi cái phải tìm; bài 3 nâng cao hoặc kết hợp thêm một kiến thức. "
+    "Mỗi bài đủ dữ kiện, giải được, kèm chiến lược (không lộ đáp án) và lời giải đúng." + JSON_RULE +
+    ' Cấu trúc: {"chu_de":"tên dạng bài","bai":[{"muc_do":"Tương tự","de":"...","chien_luoc":"...","loi_giai":"..."}]}'
+)
 SYS_PLAN = BASE + (
     "Bạn nhận thống kê hồ sơ học XSTK của một học sinh (JSON). Chỉ dựa vào số liệu đó, không bịa. Trả lời dưới 350 từ, gồm: "
     "**Nhận định** (2-4 gạch đầu dòng nêu quy luật lỗi sai xuyên suốt); **Ưu tiên ôn** (tối đa 3 chủ đề, vì sao); "
-    "**Kế hoạch 7 ngày** (mỗi ngày một việc cụ thể, dùng các chức năng: Chấm bài, Luyện tập, Vấn đáp, Bản đồ tư duy); "
-    "**Cách tự kiểm tra tiến bộ**. Nếu dữ liệu còn ít, nói rõ và đề xuất làm thêm."
+    "**Kế hoạch 7 ngày** (mỗi ngày một việc cụ thể, dùng 3 quy trình của ứng dụng: Học khái niệm (tiếp cận, hình thành, "
+    "vấn đáp, luyện tập, sơ đồ tư duy), Học định lí (tính thử, phát biểu, chứng minh, vấn đáp, luyện tập), Giải toán "
+    "(phân tích đề, chiến lược, chấm bài, bài tập tương tự)); **Cách tự kiểm tra tiến bộ**. "
+    "Nếu dữ liệu còn ít, nói rõ và đề xuất làm thêm."
 )
 
 S = st.session_state
@@ -294,16 +431,24 @@ def memo(key, fn):
 
 
 # ───────────────────────── GỌI AI (GEMINI) ─────────────────────────
-def _key():
+def _key_and_source():
+    """Ưu tiên biến môi trường (GitHub Secrets), sau đó Secrets của Streamlit Community Cloud."""
+    k = os.environ.get(KEY_NAME, "").strip()
+    if k:
+        return k, "GitHub Secrets / biến môi trường"
     try:
-        k = st.secrets["GEMINI_API_KEY"]
-    except Exception:
+        k = str(st.secrets.get(KEY_NAME, "") or "").strip()
+    except Exception:  # chưa có tệp secrets.toml
         k = ""
-    return str(k or EMBEDDED_KEY)
+    return (k, "Streamlit Secrets") if k else ("", "")
+
+
+def _key():
+    return _key_and_source()[0]
 
 
 def _has_key():
-    return _key().startswith("AIza")
+    return len(_key()) >= 20
 
 
 @st.cache_resource
@@ -314,7 +459,7 @@ def _client(key):
 def ask(system, content=None, msgs=None, max_tokens=3000, think="minimal", json_mode=False):
     """Một lượt gọi thật tới Gemini, đi qua bộ điều tiết. Trả về text hoặc None (đã báo lỗi, không lộ khóa)."""
     if not _has_key():
-        st.error("Chưa cấu hình API key. Quản trị viên cần thêm khóa vào Secrets hoặc vào mã nguồn.")
+        st.error("Chưa cấu hình GEMINI_API_KEY. Quản trị viên cần thêm khóa vào GitHub Secrets hoặc Streamlit Secrets.")
         return None
     sh, ip = shared(), _ip()
     who = [(("u", (S.get("user") or "?").lower()), USER_DAILY)] + ([(("ip", ip), IP_DAILY)] if ip else [])
@@ -343,27 +488,39 @@ def ask(system, content=None, msgs=None, max_tokens=3000, think="minimal", json_
         system_instruction=system, max_output_tokens=max_tokens + HEAD[think],
         thinking_config=types.ThinkingConfig(thinking_level=think),
         response_mime_type="application/json" if json_mode else None)
+    r = None
+    for attempt in range(2):  # lỗi mạng hoặc máy chủ 5xx thoáng qua: thử lại một lần
+        try:
+            r = _client(_key()).models.generate_content(model=MODEL, contents=content, config=cfg)
+            break
+        except errors.APIError as e:
+            code = getattr(e, "code", None)
+            if code == 429:
+                daily = "perday" in str(e).lower().replace(" ", "")
+                sh.penalize(3600 if daily else 45, day=daily)
+                st.error("AI đã hết hạn mức hôm nay." if daily else "AI đang quá tải. Hãy đợi khoảng 1 phút rồi thử lại.")
+                return None
+            if code in (400, 401, 403):
+                st.error(f"Yêu cầu bị từ chối (mã {code}). Kiểm tra API key hoặc tệp tải lên.")
+                return None
+            if attempt:
+                st.error(f"Lỗi kết nối AI (mã {code}). Hãy thử lại.")
+                return None
+        except Exception as e:
+            if attempt:
+                st.error(f"Lỗi kết nối AI ({type(e).__name__}). Hãy thử lại.")
+                return None
+        time.sleep(1.5)
+    used = getattr(getattr(r, "usage_metadata", None), "total_token_count", None)
+    if used:
+        sh.settle(h, used)
     try:
-        r = _client(_key()).models.generate_content(model=MODEL, contents=content, config=cfg)
-    except errors.APIError as e:
-        code = getattr(e, "code", None)
-        if code == 429:
-            daily = "perday" in str(e).lower().replace(" ", "")
-            sh.penalize(3600 if daily else 45, day=daily)
-            st.error("AI đã hết hạn mức hôm nay." if daily else "AI đang quá tải. Hãy đợi khoảng 1 phút rồi thử lại.")
-        elif code in (400, 401, 403):
-            st.error(f"Yêu cầu bị từ chối (mã {code}). Kiểm tra API key hoặc tệp tải lên.")
-        else:
-            st.error(f"Lỗi kết nối AI (mã {code}). Hãy thử lại.")
-    except Exception as e:
-        st.error(f"Lỗi kết nối AI ({type(e).__name__}). Hãy thử lại.")
-    else:
-        used = getattr(getattr(r, "usage_metadata", None), "total_token_count", None)
-        if used:
-            sh.settle(h, used)
-        if r.text:
-            return r.text.strip()
-        st.error("AI không trả lời (có thể do bộ lọc an toàn hoặc bị cắt). Hãy diễn đạt lại và thử lại.")
+        text = r.text
+    except Exception:
+        text = None
+    if text:
+        return text.strip()
+    st.error("AI không trả lời (có thể do bộ lọc an toàn hoặc bị cắt). Hãy diễn đạt lại và thử lại.")
     return None
 
 
@@ -391,7 +548,9 @@ def ask_json(system, content, max_tokens=3000, think="minimal", cache=True):
             if t is None:
                 return None
             try:
-                return _fix(json.loads(t[t.index("{"): t.rindex("}") + 1], strict=False))
+                v = _fix(json.loads(t[t.index("{"): t.rindex("}") + 1], strict=False))
+                if isinstance(v, dict):
+                    return v
             except ValueError:
                 continue
         st.error("AI trả về dữ liệu không đọc được. Hãy thử lại.")
@@ -509,7 +668,7 @@ def profile_dialog():
     ev = [e for e in P.get("events", []) if isinstance(e, dict)]
     st.markdown(f"**{P['name']}** · {len(ev)} lượt học")
     if not ev:
-        st.info("Chưa có dữ liệu. Hãy chấm một bài, làm bài tập hoặc vấn đáp để hồ sơ bắt đầu ghi nhận.")
+        st.info("Chưa có dữ liệu. Hãy làm bài, luyện tập hoặc vấn đáp trong một quy trình để hồ sơ bắt đầu ghi nhận.")
         return
     sc = [num(e.get("diem")) for e in ev]
     avg, rec, prev = sum(sc) / len(sc), sc[-5:], sc[-10:-5]
@@ -520,6 +679,10 @@ def profile_dialog():
     c3.metric("5 lượt gần nhất", f"{ra:.1f}", f"{ra - sum(prev) / len(prev):+.1f}" if prev else None)
     st.markdown("**Diễn tiến điểm**")
     st.line_chart(pd.DataFrame({"Điểm": sc}), color="#0F5C5A")
+
+    by_wf = Counter(WF_LOG.get(e.get("mode"), "Khác") for e in ev)
+    st.markdown("**Số lượt theo quy trình**")
+    st.bar_chart(pd.Series(by_wf, name="Số lượt"), color="#2F5D8C", horizontal=True)
 
     all_err = [x for e in ev for x in (e.get("loi_sai") or []) if isinstance(x, dict)]
     by_type = Counter(x.get("loai", "Khác") for x in all_err)
@@ -546,7 +709,8 @@ def profile_dialog():
     st.divider()
     if st.button("Đề xuất phương án học cải thiện", icon=":material/route:", type="primary", key="b_plan"):
         data = {"so_luot": len(ev), "diem_tb": round(avg, 1), "diem_5_gan_nhat": round(ra, 1),
-                "loi_theo_nhom": dict(by_type), "chu_de_yeu_nhat": topic.head(3).to_dict("records"),
+                "luot_theo_quy_trinh": dict(by_wf), "loi_theo_nhom": dict(by_type),
+                "chu_de_yeu_nhat": topic.head(3).to_dict("records"),
                 "lo_hong_hay_gap": dict(gaps.most_common(8)),
                 "sai_lam_gan_day": [x.get("mo_ta", "") for x in all_err[-6:]]}
         with st.spinner("Đang phân tích hồ sơ..."):
@@ -556,40 +720,129 @@ def profile_dialog():
 
 
 # ───────────────────────── GIAO DIỆN CHUNG ─────────────────────────
+BELL = (  # đường cong phân phối chuẩn, vùng giữa được tô
+    '<svg class="bell" viewBox="0 0 64 36" role="img" aria-label="đường cong phân phối chuẩn">'
+    '<path d="M22 33 L22 11 C25 6 28 4 32 4 C36 4 39 6 42 11 L42 33 Z" fill="currentColor" opacity=".18"/>'
+    '<path d="M2 33 C14 33 20 4 32 4 C44 4 50 33 62 33" fill="none" stroke="currentColor" stroke-width="3" '
+    'stroke-linecap="round"/><line x1="32" y1="5" x2="32" y2="33" stroke="currentColor" stroke-width="1.6" '
+    'stroke-dasharray="2.5 3"/><line x1="1" y1="34" x2="63" y2="34" stroke="currentColor" stroke-width="1.6"/></svg>'
+)
+
+
+def _art():
+    """Hình trang trí: biểu đồ tần số và đường cong chuẩn, kèm vài kí hiệu XSTK."""
+    hs = [14, 26, 46, 74, 104, 128, 136, 122, 98, 70, 44, 24, 12]
+    bars = "".join(f'<rect x="{34 + i * 23}" y="{190 - h}" width="19" height="{h}" rx="3" '
+                   f'fill="{"#0F5C5A" if 4 <= i <= 8 else "#0F5C5A55"}"/>' for i, h in enumerate(hs))
+    return (
+        '<svg viewBox="0 0 360 230" aria-hidden="true" focusable="false">'
+        f'{bars}'
+        '<path d="M22 190 C110 190 120 46 183 46 C246 46 256 190 344 190" fill="none" stroke="#B4531F" '
+        'stroke-width="3" stroke-linecap="round"/>'
+        '<line x1="183" y1="40" x2="183" y2="198" stroke="#1F2A27" stroke-width="1.2" stroke-dasharray="3 4"/>'
+        '<line x1="16" y1="191" x2="350" y2="191" stroke="#1F2A27" stroke-width="1.5"/>'
+        '<text x="183" y="216" text-anchor="middle" class="t">μ</text>'
+        '<text x="117" y="216" text-anchor="middle" class="t">μ − σ</text>'
+        '<text x="249" y="216" text-anchor="middle" class="t">μ + σ</text>'
+        '<text x="18" y="34" class="f">P(A | B) = P(AB) / P(B)</text>'
+        '<text x="250" y="96" class="f">σ² = E(X²) − μ²</text>'
+        '<text x="18" y="70" class="f">x̄ ± z·s/√n</text>'
+        '</svg>'
+    )
+
+
 CSS = """<style>
-@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap');
-:root{--paper:#F5F1E8;--card:#FBF9F4;--ink:#1F2A27;--muted:#5E6B66;--line:#D9D2C3;--teal:#0F5C5A;--clay:#B4531F;--amber:#8A6A12}
-.stApp{background:var(--paper);color:var(--ink);font-family:'Be Vietnam Pro',system-ui,-apple-system,'Segoe UI',sans-serif}
-.block-container{max-width:1100px;padding:2.2rem 1.1rem 5rem}
+@import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap');
+:root{--paper:#F5F1E8;--card:#FBF9F4;--ink:#1F2A27;--muted:#5E6B66;--line:#D9D2C3;--teal:#0F5C5A;--teal-2:#E3EEEC;--clay:#B4531F;--amber:#8A6A12}
+.stApp{background:radial-gradient(circle at 1px 1px,rgba(15,92,90,.07) 1px,transparent 0) 0 0/22px 22px,var(--paper);color:var(--ink);
+  font-family:'Be Vietnam Pro',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+/* thanh header của Streamlit nằm đè lên nội dung: làm trong suốt và chừa khoảng trống phía trên */
+header[data-testid="stHeader"]{background:transparent!important}
+.block-container{max-width:1120px;padding:4.2rem 1.1rem 5rem!important}
 #MainMenu,footer{visibility:hidden}
-h1,h2,h3{font-family:'Newsreader',Georgia,serif!important;color:var(--ink);letter-spacing:-.015em}
-h1{font-size:clamp(2rem,5vw,3.2rem)!important;line-height:1.08!important;font-weight:600!important;margin:.2rem 0 .7rem!important;padding:0!important}
-h2{font-size:clamp(1.5rem,3.4vw,2rem)!important;font-weight:600!important;padding-top:.4rem!important}
-.eyebrow{font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--teal);font-weight:600}
-.lead{color:var(--muted);font-size:1.05rem;line-height:1.65;max-width:34rem}
+[data-testid="stHeaderActionElements"]{display:none}
+h1,h2,h3,h4{font-family:'Newsreader',Georgia,serif!important;color:var(--ink);letter-spacing:-.01em}
+h4{font-size:1.25rem!important;padding:.1rem 0 .4rem!important}
+.eyebrow{display:inline-block;font-size:.74rem;line-height:1.7;letter-spacing:.14em;text-transform:uppercase;color:var(--teal);
+  font-weight:600;padding:.05rem 0}
+.brand{display:flex;align-items:center;gap:.6rem;font-weight:700;font-size:1.05rem;color:var(--ink);line-height:1.4;padding:.2rem 0}
+.brand .logo{display:grid;place-items:center;width:38px;height:38px;border-radius:11px;background:var(--teal);color:#fff}
+.brand .logo .bell{width:24px;height:auto;margin:0}
+.brand small{display:block;font-weight:500;font-size:.75rem;color:var(--muted)}
+.hero{display:grid;grid-template-columns:1.35fr 1fr;gap:2rem;align-items:center;margin:.6rem 0 1.4rem;padding:1.6rem 1.8rem;
+  background:linear-gradient(135deg,var(--card) 0%,#F1ECE0 100%);border:1px solid var(--line);border-radius:22px;
+  box-shadow:0 1px 0 rgba(255,255,255,.6) inset,0 18px 40px -28px rgba(31,42,39,.35)}
+.hero .title{font-family:'Newsreader',Georgia,serif;font-weight:600;font-size:clamp(1.9rem,4.6vw,3rem);line-height:1.18;
+  letter-spacing:-.015em;color:var(--ink);margin:.35rem 0 .7rem;padding-top:.15em}
+.hero .title .bell{width:1.3em;height:.75em;color:var(--teal);vertical-align:-.04em;margin:0 .08em}
+.hero .title em{font-style:normal;color:var(--teal)}
+.lead{color:var(--muted);font-size:1.04rem;line-height:1.65;max-width:36rem;margin:0}
+.chips{display:flex;flex-wrap:wrap;gap:.45rem;margin-top:1rem}
+.chips span{font-size:.8rem;font-weight:500;padding:.3rem .7rem;border-radius:999px;background:var(--teal-2);color:var(--teal)}
+.hero-art svg{width:100%;height:auto;display:block}
+.hero-art .t{font:500 13px 'Be Vietnam Pro',sans-serif;fill:var(--muted)}
+.hero-art .f{font:italic 500 14px 'Newsreader',Georgia,serif;fill:var(--ink);opacity:.72}
+.flow{display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;border-radius:16px;background:var(--card);
+  border:1px solid var(--line);margin:.2rem 0 .8rem}
+.flow .ico{flex:none;width:42px;height:42px;border-radius:12px;background:var(--teal);color:#fff;display:grid;place-items:center;
+  font:600 1.15rem 'Newsreader',serif}
+.flow b{font-size:1.02rem}.flow p{margin:.15rem 0 0;color:var(--muted);font-size:.93rem;line-height:1.5}
+.chain{list-style:none;display:flex;flex-wrap:wrap;gap:.35rem .5rem;padding:0;margin:.65rem 0 0}
+.chain li{display:flex;align-items:center;gap:.4rem;font-size:.82rem;color:var(--muted);margin:0}
+.chain li i{font-style:normal;display:grid;place-items:center;width:22px;height:22px;border-radius:50%;
+  border:1.5px solid var(--line);font-weight:600;font-size:.75rem;background:#fff}
+.chain li.on{color:var(--ink);font-weight:600}.chain li.on i{background:var(--teal);border-color:var(--teal);color:#fff}
+.chain li.done i{background:var(--teal-2);border-color:var(--teal);color:var(--teal)}
+.chain li+li::before{content:"";width:14px;height:1.5px;background:var(--line);margin-right:.1rem}
+.stepcard{border-left:4px solid var(--teal);background:var(--card);border-radius:4px 14px 14px 4px;padding:.85rem 1.1rem;
+  margin:.4rem 0 1rem;border-top:1px solid var(--line);border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stepcard .no{font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--teal);font-weight:600}
+.stepcard .nm{font-family:'Newsreader',Georgia,serif;font-size:1.45rem;font-weight:600;line-height:1.3;margin:.1rem 0 .2rem}
+.stepcard p{margin:.1rem 0;color:var(--ink);font-size:.95rem;line-height:1.55}
+.stepcard p.todo{color:var(--muted)}
+.bar{height:5px;border-radius:9px;background:var(--line);overflow:hidden;margin:.55rem 0 0}
+.bar span{display:block;height:100%;background:var(--teal);border-radius:9px;transition:width .3s ease}
+.sec{font-family:'Newsreader',Georgia,serif;font-size:1.25rem;font-weight:600;margin:.2rem 0 .3rem}
 div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:16px}
-.stButton>button,.stDownloadButton>button,.stFormSubmitButton>button{width:100%;min-height:46px;border-radius:12px;font-weight:500;transition:transform .15s ease,border-color .15s ease}
-.stButton>button:hover,.stDownloadButton>button:hover{transform:translateY(-1px);border-color:var(--teal)}
+.stButton>button,.stDownloadButton>button,.stFormSubmitButton>button{width:100%;min-height:46px;border-radius:12px;
+  font-weight:500;transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}
+.stButton>button:hover,.stDownloadButton>button:hover{transform:translateY(-1px);border-color:var(--teal);
+  box-shadow:0 6px 16px -10px rgba(15,92,90,.6)}
 .stButton>button:active{transform:scale(.98)}
+[data-testid="stButtonGroup"] button{min-height:42px}
 :focus-visible{outline:2px solid var(--teal)!important;outline-offset:2px}
 .score{display:flex;align-items:baseline;gap:.3rem;font-family:'Newsreader',Georgia,serif;margin:.1rem 0 .5rem}
-.score b{font-size:3.6rem;line-height:1;font-weight:600}.score span{color:var(--muted);font-size:1.2rem}
+.score b{font-size:3.4rem;line-height:1.1;font-weight:600}.score span{color:var(--muted);font-size:1.2rem}
 .score.teal b{color:var(--teal)}.score.amber b{color:var(--amber)}.score.clay b{color:var(--clay)}
+.foot{margin-top:3rem;padding-top:1.2rem;border-top:1px solid var(--line);color:var(--muted);font-size:.82rem;
+  display:flex;flex-wrap:wrap;gap:.4rem 1.2rem;justify-content:space-between}
 @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.block-container{animation:rise .45s ease both}
+.hero,.flow,.stepcard{animation:rise .45s ease both}
+@media (max-width:760px){
+  .block-container{padding:3.6rem .8rem 4rem!important}
+  .hero{grid-template-columns:1fr;padding:1.2rem 1.1rem;gap:.5rem}
+  .hero-art{display:none}
+  .flow{padding:.8rem .9rem}
+  .chain li+li::before{display:none}
+}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>"""
 
 
-def head(title, sub):
-    st.markdown(f"## {title}")
-    st.caption(sub)
+def hero():
+    st.markdown(
+        '<section class="hero"><div>'
+        '<div class="eyebrow">Xác suất thống kê · Trợ giảng AI</div>'
+        f'<div class="title" role="heading" aria-level="1"><em>Hiểu bản chất</em> {BELL}<br>giải đúng từng bài toán</div>'
+        '<p class="lead">Học khái niệm, học định lí và giải toán theo quy trình 4 bước, có trợ giảng AI đồng hành.</p>'
+        '<div class="chips"><span>Học khái niệm</span><span>Học định lí</span><span>Giải toán 4 bước</span>'
+        '<span>Hồ sơ lỗi sai cá nhân</span></div>'
+        f'</div><div class="hero-art">{_art()}</div></section>',
+        unsafe_allow_html=True)
 
 
-def topic_pick(k):
-    sel = st.selectbox("Chủ đề", TOPICS, key=f"{k}_sel")
-    own = st.text_input("Hoặc nhập chủ đề riêng", key=f"{k}_own", placeholder="Ví dụ: Phân phối chuẩn tắc")
-    return own.strip() or sel
+def sec(title):
+    st.markdown(f'<div class="sec">{title}</div>', unsafe_allow_html=True)
 
 
 def show_score(d):
@@ -604,7 +857,7 @@ def show_issues(g):
             st.markdown(f"- *{e['loai']}*: {e['mo_ta']}")
     if g.get("lo_hong"):
         st.markdown("**Lỗ hổng kiến thức**")
-        for x in g["lo_hong"]:
+        for x in g["lo_hong"] if isinstance(g["lo_hong"], list) else [g["lo_hong"]]:
             st.markdown(f"- {x}")
 
 
@@ -621,199 +874,131 @@ def show_grade(g):
             st.markdown(str(g["van_ban_chep_lai"]))
 
 
-# ───────────────────────── TRANG: CHẤM BÀI ─────────────────────────
-def page_tutor():
-    head("Gia sư chấm bài", "Tải đề và bài làm. AI đọc chữ viết tay (OCR), chấm điểm và gợi ý hướng giải, không tiết lộ đáp án.")
-    types = ["png", "jpg", "jpeg", "pdf"]
-    with st.container(border=True):
-        a, b = st.columns(2, gap="large")
-        with a:
-            st.markdown("**1. Đề bài**")
-            prob = st.text_area("Nhập đề bài", key="t_prob", height=150, max_chars=4000)
-            pf = st.file_uploader("Hoặc tải ảnh/PDF đề bài", type=types, accept_multiple_files=True, key="t_pf")
-        with b:
-            st.markdown("**2. Bài làm của bạn**")
-            wt = st.text_area("Gõ bài làm (không bắt buộc)", key="t_wt", height=150, max_chars=4000)
-            wf = st.file_uploader("Tải ảnh chụp/PDF bài làm", type=types, accept_multiple_files=True, key="t_wf")
-        has_p, has_w = bool(prob.strip() or pf), bool(wt.strip() or wf)
-        c1, c2, c3 = st.columns(3)
-        if c1.button("Gợi ý chiến lược", icon=":material/lightbulb:", key="b_t_hint"):
-            if not has_p:
-                st.warning("Hãy nhập hoặc tải đề bài trước.")
-            else:
-                with st.spinner("Đang phân tích đề..."):
-                    S.r_hint = ask_cached(SYS_HINT, build(prob, pf), max_tokens=1800, think="medium")
-        if c2.button("Chấm bài", icon=":material/task_alt:", type="primary", key="b_t_grade"):
-            if not (has_p and has_w):
-                st.warning("Cần có cả đề bài và bài làm.")
-            else:
-                with st.spinner("Đang đọc bài làm và chấm điểm..."):
-                    g = ask_json(SYS_GRADE, build(prob, pf, wt, wf), max_tokens=3500, think="medium")
-                if g:
-                    if g != S.get("r_grade"):  # bấm chấm lại y hệt: dùng kết quả cũ, không ghi hồ sơ lần nữa
-                        log_grade("tutor", g)
-                    S.r_grade = g
-        if c3.button("Hiện bài giải chi tiết", icon=":material/menu_book:", key="b_t_sol"):
-            if not has_p:
-                st.warning("Hãy nhập hoặc tải đề bài trước.")
-            else:
-                with st.spinner("Đang viết bài giải..."):
-                    S.r_sol = ask_cached(SYS_SOL, build(prob, pf), max_tokens=3500, think="medium")
-    shown = False
-    if S.get("r_hint"):
-        shown = True
-        with st.container(border=True):
-            st.markdown("#### Chiến lược giải")
-            st.markdown(S.r_hint)
-    if S.get("r_grade"):
-        shown = True
-        with st.container(border=True):
-            st.markdown("#### Kết quả chấm")
-            show_grade(S.r_grade)
-    if S.get("r_sol"):
-        shown = True
-        with st.container(border=True):
-            st.markdown("#### Bài giải chi tiết")
-            st.markdown(S.r_sol)
-    if shown and st.button("Xoá kết quả", key="b_t_clear"):
-        for k in ("r_hint", "r_grade", "r_sol"):
-            S.pop(k, None)
-        st.rerun()
-
-
-# ───────────────────────── TRANG: LUYỆN TẬP ─────────────────────────
-def ok_mc(q):
-    return (isinstance(q, dict) and q.get("de") and isinstance(q.get("lua_chon"), dict)
-            and all(x in q["lua_chon"] for x in "ABCD") and q.get("dap_an") in list("ABCD"))
-
-
 def toggle(k):
     S[k] = not S.get(k)
 
 
-def mc_card(i, q, topic):
-    k = f"pq_mc{i}"
-    with st.container(border=True):
-        st.markdown(f"**Câu {i + 1}.** {q['de']}")
-        pick = st.radio("Chọn đáp án", list("ABCD"), index=None, key=k, label_visibility="collapsed",
-                        format_func=lambda x: f"{x}. {q['lua_chon'][x]}")
-        a, b, c = st.columns(3)
-        a.button("Gợi ý chiến lược", icon=":material/lightbulb:", key=f"b_{k}_h", on_click=toggle, args=(f"{k}_h",))
-        if b.button("Chấm bài", icon=":material/task_alt:", type="primary", key=f"b_{k}_g"):
-            if pick is None:
-                st.warning("Hãy chọn một đáp án.")
-            else:
-                S[f"{k}_g"] = pick
-                if not S.get(f"{k}_l"):  # chỉ ghi hồ sơ một lần cho mỗi câu
-                    S[f"{k}_l"] = 1
-                    m = (q.get("sai_lam") or {}).get(pick)
-                    log("practice", topic, 10.0 if pick == q["dap_an"] else 0.0,
-                        [] if pick == q["dap_an"] else [m if m else {"loai": "Khác", "mo_ta": "Chọn sai đáp án"}], [])
-        c.button("Hiện lời giải", icon=":material/menu_book:", key=f"b_{k}_s", on_click=toggle, args=(f"{k}_s",))
-        gp = S.get(f"{k}_g")
-        if gp:
-            if gp == q["dap_an"]:
-                st.success(f"Chính xác. Bạn đã chọn {gp}.")
-            else:
-                m = (q.get("sai_lam") or {}).get(gp)
-                why = m.get("mo_ta", "") if isinstance(m, dict) else str(m or "")
-                st.error(f"Chưa đúng (bạn chọn {gp}). {why}")
-        if S.get(f"{k}_h"):
-            st.info(q.get("chien_luoc", ""))
-        if S.get(f"{k}_s"):
-            st.success(f"**Đáp án: {q['dap_an']}**\n\n{q.get('loi_giai', '')}")
+def _token():
+    return f"{random.getrandbits(40):x}"
 
 
-def es_card(i, q, topic):
-    k = f"pq_es{i}"
+def clear_prefix(p):
+    for k in [x for x in S if isinstance(x, str) and x.startswith(p)]:
+        del S[k]
+
+
+def result_box(title, body):
     with st.container(border=True):
-        st.markdown(f"**Câu {i + 1}.** {q['de']}")
-        ans = st.text_area("Bài làm của bạn", key=f"{k}_a", height=130, max_chars=4000)
-        with st.expander("Hoặc tải ảnh/PDF bài làm"):
-            fl = st.file_uploader("Ảnh/PDF", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True,
-                                  key=f"{k}_f", label_visibility="collapsed")
-        a, b, c = st.columns(3)
-        a.button("Gợi ý chiến lược", icon=":material/lightbulb:", key=f"b_{k}_h", on_click=toggle, args=(f"{k}_h",))
-        if b.button("Chấm bài", icon=":material/task_alt:", type="primary", key=f"b_{k}_g"):
-            if not (ans.strip() or fl):
-                st.warning("Hãy nhập hoặc tải bài làm.")
+        st.markdown(f"#### {title}")
+        st.markdown(body)
+
+
+def ai_button(R, slot, label, icon, run, primary=True):
+    """Nút gọi AI; kết quả lưu ở R[slot] để không mất khi chuyển bước."""
+    if st.button(label, icon=icon, type="primary" if primary and not R.get(slot) else "secondary",
+                 key=f"b_{R['id']}_{slot}"):
+        with st.spinner("Trợ giảng AI đang soạn..."):
+            v = run()
+        if v:
+            R[slot] = v
+
+
+# ───────────────────────── KHUNG QUY TRÌNH 4 BƯỚC ─────────────────────────
+def _go(wf, i):
+    S[f"{wf}_step"] = i
+
+
+def flow_banner(wf, cur):
+    W = WF[wf]
+    chain = "".join(
+        f'<li class="{"on" if i + 1 == cur else "done" if i + 1 < cur else ""}"><i>{i + 1}</i>{n}</li>'
+        for i, (n, _, _) in enumerate(W["steps"]))
+    st.markdown(
+        f'<div class="flow"><div class="ico">{list(WF).index(wf) + 1}</div><div><b>Quy trình {W["name"].lower()}</b>'
+        f'<p>{W["desc"]}</p><ol class="chain">{chain}</ol></div></div>', unsafe_allow_html=True)
+
+
+def step_nav(wf):
+    """Thanh chọn bước. Trả về bước hiện tại (1-4)."""
+    W, k = WF[wf], f"{wf}_step"
+    if S.get(k) not in (1, 2, 3, 4):
+        S[k] = S.get(f"{k}_last", 1)  # lần đầu hoặc khi bấm bỏ chọn
+    cur = S[k]
+    flow_banner(wf, cur)
+    st.segmented_control("Bước", [1, 2, 3, 4], key=k, label_visibility="collapsed",
+                         format_func=lambda i: f"Bước {i} · {W['steps'][i - 1][0]}")
+    cur = S.get(k) or cur
+    S[f"{k}_last"] = cur
+    name, goal, todo = W["steps"][cur - 1]
+    st.markdown(
+        f'<div class="stepcard"><div class="no">Bước {cur}/4</div><div class="nm">{name}</div>'
+        f'<p>{goal}</p><p class="todo">Việc của bạn: {todo}</p>'
+        f'<div class="bar"><span style="width:{cur * 25}%"></span></div></div>', unsafe_allow_html=True)
+    return cur
+
+
+def step_footer(wf, cur):
+    st.write("")
+    a, _, b = st.columns([1, 1.4, 1])
+    if cur > 1:
+        a.button("Bước trước", icon=":material/arrow_back:", key=f"{wf}_prev", on_click=_go, args=(wf, cur - 1))
+    if cur < 4:
+        b.button(f"Sang bước {cur + 1}", icon=":material/arrow_forward:", key=f"{wf}_next", type="primary",
+                 on_click=_go, args=(wf, cur + 1))
+
+
+def topic_pick(wf):
+    W = WF[wf]
+    a, b = st.columns([1.3, 1], gap="medium")
+    sel = a.selectbox(W["pick"], W["topics"], key=f"{wf}_sel")
+    own = b.text_input("Hoặc nhập chủ đề riêng", key=f"{wf}_own", max_chars=80,
+                       placeholder="Ví dụ: Biến cố đồng khả năng" if wf == "concept" else "Ví dụ: Bất đẳng thức Chebyshev")
+    return own.strip() or sel
+
+
+def wf_state(wf, topic):
+    """Kết quả của một quy trình gắn với chủ đề đang học; đổi chủ đề thì bắt đầu lại sạch sẽ."""
+    R = S.get(f"{wf}_R")
+    if not R or R.get("topic") != topic:
+        if R:
+            clear_prefix(f"w{R['id']}")
+        R = {"topic": topic, "id": _token(), "wf": wf}
+        S[f"{wf}_R"] = R
+    return R
+
+
+# ───────────────────────── KHỐI CHỨC NĂNG DÙNG CHUNG ─────────────────────────
+def self_check(wf, R, topic):
+    what = "định nghĩa khái niệm" if wf == "concept" else "định lí, công thức"
+    with st.container(border=True):
+        sec(f"Tự phát biểu lại {what}")
+        st.caption("Viết bằng lời của bạn, không chép lại. AI chỉ ra chỗ thiếu dấu hiệu bản chất, giả thiết hoặc điều kiện.")
+        txt = st.text_area("Phát biểu của bạn", key=f"w{R['id']}_self", height=110, max_chars=1500,
+                           label_visibility="collapsed", placeholder="Ví dụ: ... là ... khi và chỉ khi ...")
+        if st.button("Nhận xét phát biểu", icon=":material/rate_review:", key=f"b_{R['id']}_self"):
+            if not txt.strip():
+                st.warning("Hãy viết phát biểu của bạn trước.")
             else:
-                ref = f"ĐÁP ÁN THAM KHẢO VÀ THANG ĐIỂM (chỉ để chấm, không tiết lộ):\n{q.get('loi_giai', '')}\n{q.get('tieu_chi', '')}"
-                with st.spinner("Đang chấm..."):
-                    g = ask_json(SYS_GRADE, build(q["de"], None, ans, fl, ref), max_tokens=3500, think="medium")
+                with st.spinner("Đang đọc phát biểu..."):
+                    g = ask_json(SYS_SELF, f"Chủ đề: {topic}\nLoại: {what}\nPhát biểu của học sinh:\n{txt.strip()}",
+                                 max_tokens=1200)
                 if g:
                     g.setdefault("chu_de", topic)
-                    if g != S.get(f"{k}_g"):
-                        log_grade("practice", g)
-                    S[f"{k}_g"] = g
-        c.button("Hiện lời giải", icon=":material/menu_book:", key=f"b_{k}_s", on_click=toggle, args=(f"{k}_s",))
-        if S.get(f"{k}_g"):
-            show_grade(S[f"{k}_g"])
-        if S.get(f"{k}_h"):
-            st.info(q.get("chien_luoc", ""))
-        if S.get(f"{k}_s"):
-            st.success(q.get("loi_giai", ""))
+                    if g != R.get("self"):
+                        log_grade(wf, g)
+                    R["self"] = g
+        if R.get("self"):
+            g = R["self"]
+            show_score(num(g.get("diem")))
+            st.markdown(str(g.get("nhan_xet", "")))
+            show_issues(g)
 
 
-def get_practice(topic, level):
-    """Kho đề dùng chung: mỗi (chủ đề, mức độ) chỉ sinh tối đa POOL_SIZE bộ; người sau nhận bộ chưa làm hoặc bộ có sẵn."""
-    sh, key = shared(), (topic.strip().lower(), level)
-    seen = S.setdefault("pool_seen", set())
-    with sh.flight_lock(("gen", key)):
-        pool = sh.pool_get(key)
-        fresh = [i for i in range(len(pool)) if (key, i) not in seen]
-        if fresh:
-            i = random.choice(fresh)
-        elif len(pool) >= POOL_SIZE:
-            i = random.randrange(len(pool))
-        else:
-            d = ask_json(SYS_PRACTICE, f"Chủ đề: {topic}. Mức độ: {level}.", max_tokens=9000, think="medium", cache=False) or {}
-            mc = [q for q in (d.get("trac_nghiem") or []) if ok_mc(q)][:5]
-            es = [q for q in (d.get("tu_luan") or []) if isinstance(q, dict) and q.get("de")][:5]
-            if not (mc or es):
-                return None
-            sh.pool_add(key, {"mc": mc, "es": es})
-            i = len(sh.pool_get(key)) - 1
-        seen.add((key, i))
-        return copy.deepcopy(sh.pool_get(key)[i])
-
-
-def page_practice():
-    head("Luyện tập", "5 câu trắc nghiệm và 5 câu tự luận theo chủ đề bạn chọn. Chiến lược gợi ý không chứa đáp án.")
-    with st.container(border=True):
-        a, b = st.columns([2, 1], gap="large")
-        with a:
-            topic = topic_pick("p")
-        with b:
-            level = st.radio("Mức độ", ["Cơ bản", "Trung bình", "Nâng cao"], index=1, key="p_lv")
-        if st.button("Tạo bộ 10 bài tập", icon=":material/auto_awesome:", type="primary", key="b_p_gen"):
-            for kk in [x for x in S if x.startswith("pq_")]:
-                del S[kk]
-            with st.spinner("Đang chuẩn bị bộ bài tập..."):
-                item = get_practice(topic, level)
-            if item:
-                S.r_pq = {"topic": topic, "mc": item["mc"], "es": item["es"]}
-            else:
-                st.error("Không tạo được bài tập. Hãy thử lại.")
-    pq = S.get("r_pq")
-    if not pq:
-        st.info("Chọn chủ đề rồi bấm “Tạo bộ 10 bài tập”.")
-        return
-    t1, t2 = st.tabs([f"Trắc nghiệm ({len(pq['mc'])})", f"Tự luận ({len(pq['es'])})"])
-    with t1:
-        for i, q in enumerate(pq["mc"]):
-            mc_card(i, q, pq["topic"])
-    with t2:
-        for i, q in enumerate(pq["es"]):
-            es_card(i, q, pq["topic"])
-
-
-# ───────────────────────── TRANG: VẤN ĐÁP ─────────────────────────
 def oral_first(topic, kind):
     """Câu 1 lấy từ mẫu có sẵn, không tốn lượt AI."""
     if kind.startswith("Khái"):
         return f"Câu 1/5. Hãy phát biểu định nghĩa của «{topic}» bằng lời của bạn và nêu các dấu hiệu bản chất của khái niệm."
-    return f"Câu 1/5. Hãy phát biểu định lí hoặc công thức quan trọng nhất của chủ đề «{topic}»."
+    return f"Câu 1/5. Hãy phát biểu định lí hoặc công thức «{topic}», nói rõ các đại lượng có mặt trong đó."
 
 
 def oral_sys(O):
@@ -827,34 +1012,30 @@ def oral_sys(O):
     )
 
 
-def page_oral():
-    head("Vấn đáp lí thuyết", "Giám khảo AI hỏi 5 câu về khái niệm hoặc định lí. Cuối buổi AI chấm điểm và chỉ ra lỗ hổng kiến thức.")
-    with st.container(border=True):
-        a, b = st.columns([2, 1], gap="large")
-        with a:
-            topic = topic_pick("o")
-        with b:
-            kind = st.radio("Dạng vấn đáp", ["Khái niệm", "Định lí, công thức"], key="o_kind")
-        if st.button("Bắt đầu vấn đáp mới", icon=":material/record_voice_over:", type="primary", key="b_o_start"):
-            S.oral = {"topic": topic, "kind": kind, "res": None,
-                      "msgs": [{"role": "user", "content": "Hãy bắt đầu vấn đáp."},
-                               {"role": "assistant", "content": oral_first(topic, kind)}]}
-    O = S.get("oral")
+def oral_block(wf, R, topic):
+    kind = WF[wf]["kind"]
+    O = R.get("oral")
+    plan = ORAL_CONCEPT if wf == "concept" else ORAL_THEOREM
+    st.caption("Giám khảo AI hỏi lần lượt 5 câu. " + plan.split(": ", 1)[1])
+    if st.button("Bắt đầu vấn đáp" if not O else "Vấn đáp lại từ đầu", icon=":material/record_voice_over:",
+                 type="primary" if not O else "secondary", key=f"b_{R['id']}_ostart"):
+        O = R["oral"] = {"topic": topic, "kind": kind, "res": None,
+                         "msgs": [{"role": "user", "content": "Hãy bắt đầu vấn đáp."},
+                                  {"role": "assistant", "content": oral_first(topic, kind)}]}
     if not O:
-        st.info("Chọn chủ đề và dạng vấn đáp, rồi bấm “Bắt đầu vấn đáp mới”.")
         return
-    st.caption(f"Chủ đề: {O['topic']} · {O['kind']}")
     for m in O["msgs"][1:]:
-        st.chat_message(m["role"]).markdown(m["content"])
+        st.chat_message(m["role"], avatar=":material/school:" if m["role"] == "assistant" else ":material/person:"
+                        ).markdown(m["content"])
     done = bool(O.get("res"))
     answered = sum(m["role"] == "user" for m in O["msgs"]) - 1
-    p = st.chat_input("Nhập câu trả lời của bạn...", disabled=done or answered >= 5, max_chars=1200)
-    if p:
+    p = st.chat_input("Nhập câu trả lời của bạn...", disabled=done or answered >= 5, max_chars=1200, key=f"{wf}_chat")
+    if p and not done and answered < 5:
         O["msgs"].append({"role": "user", "content": p})
-        st.chat_message("user").markdown(p)
+        st.chat_message("user", avatar=":material/person:").markdown(p)
         answered += 1
         if answered < 5:  # câu trả lời thứ 5 không cần nhận xét riêng, để dành lượt AI cho phần chấm điểm
-            with st.chat_message("assistant"):
+            with st.chat_message("assistant", avatar=":material/school:"):
                 with st.spinner("Giám khảo đang nhận xét..."):
                     r = ask(oral_sys(O), msgs=O["msgs"], max_tokens=600)
                 if r:
@@ -863,18 +1044,20 @@ def page_oral():
                 else:
                     O["msgs"].pop()
                     answered -= 1
+    if not done:
+        st.progress(min(answered, 5) / 5, text=f"Đã trả lời {min(answered, 5)}/5 câu")
     if answered >= 5 and not done:
         st.info("Bạn đã trả lời đủ 5 câu. Bấm “Kết thúc và chấm điểm” để nhận kết quả.")
     if not done and answered >= 1 and st.button("Kết thúc và chấm điểm", icon=":material/fact_check:",
-                                                  type="primary", key="b_o_end"):
+                                                  type="primary", key=f"b_{R['id']}_oend"):
         tr = "\n".join(f"{'Giám khảo' if m['role'] == 'assistant' else 'Học sinh'}: {m['content']}" for m in O["msgs"][1:])
         with st.spinner("Đang chấm phần vấn đáp..."):
             res = ask_json(SYS_ORAL_GRADE, f"Chủ đề: {O['topic']}\nDạng: {O['kind']}\nBản ghi:\n{tr}",
                            max_tokens=2500, think="medium")
         if res:
-            O["res"] = res
             res.setdefault("chu_de", O["topic"])
-            log_grade("oral", res)
+            O["res"] = res
+            log_grade(wf, res)
             st.rerun()
     if done:
         res = O["res"]
@@ -892,7 +1075,132 @@ def page_oral():
                     st.markdown(f"- {x}")
 
 
-# ───────────────────────── TRANG: BẢN ĐỒ TƯ DUY ─────────────────────────
+# ── Luyện tập: trắc nghiệm và tự luận tạo riêng ──
+def ok_mc(q):
+    return (isinstance(q, dict) and q.get("de") and isinstance(q.get("lua_chon"), dict)
+            and all(x in q["lua_chon"] for x in "ABCD") and q.get("dap_an") in list("ABCD"))
+
+
+def ok_es(q):
+    return isinstance(q, dict) and bool(q.get("de"))
+
+
+def get_items(kind, wf, topic, level):
+    """Kho đề dùng chung: mỗi (loại, quy trình, chủ đề, mức độ) chỉ sinh tối đa POOL_SIZE bộ; người sau nhận bộ chưa làm."""
+    sh, key = shared(), (kind, wf, topic.strip().lower(), level)
+    seen = S.setdefault("pool_seen", set())
+    with sh.flight_lock(("gen", key)):
+        pool = sh.pool_get(key)
+        fresh = [i for i in range(len(pool)) if (key, i) not in seen]
+        if fresh:
+            i = random.choice(fresh)
+        elif len(pool) >= POOL_SIZE:
+            i = random.randrange(len(pool))
+        else:
+            system = (SYS_MC if kind == "mc" else SYS_ES) + " " + FOCUS.get(wf, "")
+            d = ask_json(system, f"Chủ đề: {topic}. Mức độ: {level}.", max_tokens=6000, think="medium", cache=False) or {}
+            items = [q for q in (d.get("cau") or []) if (ok_mc(q) if kind == "mc" else ok_es(q))][:5]
+            if not items:
+                return None
+            sh.pool_add(key, items)
+            i = len(sh.pool_get(key)) - 1
+        seen.add((key, i))
+        return copy.deepcopy(sh.pool_get(key)[i])
+
+
+def mc_card(k, i, q, topic, wf):
+    with st.container(border=True):
+        st.markdown(f"**Câu {i + 1}.** {q['de']}")
+        pick = st.radio("Chọn đáp án", list("ABCD"), index=None, key=k, label_visibility="collapsed",
+                        format_func=lambda x: f"{x}. {q['lua_chon'][x]}")
+        a, b, c = st.columns(3)
+        a.button("Gợi ý", icon=":material/lightbulb:", key=f"b_{k}_h", on_click=toggle, args=(f"{k}_h",))
+        if b.button("Kiểm tra", icon=":material/task_alt:", type="primary", key=f"b_{k}_g"):
+            if pick is None:
+                st.warning("Hãy chọn một đáp án.")
+            else:
+                S[f"{k}_g"] = pick
+                if not S.get(f"{k}_l"):  # chỉ ghi hồ sơ một lần cho mỗi câu
+                    S[f"{k}_l"] = 1
+                    m = (q.get("sai_lam") or {}).get(pick)
+                    log(wf, topic, 10.0 if pick == q["dap_an"] else 0.0,
+                        [] if pick == q["dap_an"] else [m if isinstance(m, dict) else {"loai": "Khác", "mo_ta": "Chọn sai đáp án"}], [])
+        c.button("Lời giải", icon=":material/menu_book:", key=f"b_{k}_s", on_click=toggle, args=(f"{k}_s",))
+        gp = S.get(f"{k}_g")
+        if gp:
+            if gp == q["dap_an"]:
+                st.success(f"Chính xác. Bạn đã chọn {gp}.")
+            else:
+                m = (q.get("sai_lam") or {}).get(gp)
+                why = m.get("mo_ta", "") if isinstance(m, dict) else str(m or "")
+                st.error(f"Chưa đúng (bạn chọn {gp}). {why}")
+        if S.get(f"{k}_h"):
+            st.info(q.get("chien_luoc", ""))
+        if S.get(f"{k}_s"):
+            st.success(f"**Đáp án: {q['dap_an']}**\n\n{q.get('loi_giai', '')}")
+
+
+def es_card(k, i, q, topic, wf):
+    with st.container(border=True):
+        st.markdown(f"**Câu {i + 1}.** {q['de']}")
+        ans = st.text_area("Bài làm của bạn", key=f"{k}_a", height=130, max_chars=4000)
+        with st.expander("Hoặc tải ảnh/PDF bài làm"):
+            fl = st.file_uploader("Ảnh/PDF", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True,
+                                  key=f"{k}_f", label_visibility="collapsed")
+        a, b, c = st.columns(3)
+        a.button("Gợi ý", icon=":material/lightbulb:", key=f"b_{k}_h", on_click=toggle, args=(f"{k}_h",))
+        if b.button("Chấm bài", icon=":material/task_alt:", type="primary", key=f"b_{k}_g"):
+            if not (ans.strip() or fl):
+                st.warning("Hãy nhập hoặc tải bài làm.")
+            else:
+                ref = f"ĐÁP ÁN THAM KHẢO VÀ THANG ĐIỂM (chỉ để chấm, không tiết lộ):\n{q.get('loi_giai', '')}\n{q.get('tieu_chi', '')}"
+                with st.spinner("Đang chấm..."):
+                    g = ask_json(SYS_GRADE, build(q["de"], None, ans, fl, ref), max_tokens=3500, think="medium")
+                if g:
+                    g.setdefault("chu_de", topic)
+                    if g != S.get(f"{k}_g"):
+                        log_grade(wf, g)
+                    S[f"{k}_g"] = g
+        c.button("Lời giải", icon=":material/menu_book:", key=f"b_{k}_s", on_click=toggle, args=(f"{k}_s",))
+        if S.get(f"{k}_g"):
+            show_grade(S[f"{k}_g"])
+        if S.get(f"{k}_h"):
+            st.info(q.get("chien_luoc", ""))
+        if S.get(f"{k}_s"):
+            st.success(q.get("loi_giai", ""))
+
+
+def practice_block(wf, R, topic):
+    with st.container(border=True):
+        sec("Luyện tập")
+        level = st.radio("Mức độ", ["Cơ bản", "Trung bình", "Nâng cao"], index=1, key=f"{wf}_lv", horizontal=True)
+        a, b = st.columns(2)
+        for col, kind, label, icon in ((a, "mc", "Tạo 5 câu trắc nghiệm", ":material/checklist:"),
+                                       (b, "es", "Tạo 5 câu tự luận", ":material/edit_note:")):
+            if col.button(label, icon=icon, type="primary", key=f"b_{R['id']}_{kind}"):
+                with st.spinner("Đang chuẩn bị bài tập..."):
+                    items = get_items(kind, wf, topic, level)
+                if items:
+                    old = R.get(kind)
+                    if old:
+                        clear_prefix(f"w{R['id']}{kind}{old['gid']}")
+                    R[kind] = {"items": items, "gid": _token(), "level": level}
+                else:
+                    st.error("Không tạo được bài tập. Hãy thử lại.")
+        st.caption("Gợi ý chỉ nêu chiến lược, không chứa đáp án. Mỗi câu kiểm tra/chấm đều được ghi vào hồ sơ.")
+    have = [k for k in ("mc", "es") if R.get(k)]
+    if not have:
+        return
+    names = {"mc": "Trắc nghiệm", "es": "Tự luận"}
+    tabs = st.tabs([f"{names[k]} · {R[k]['level']} ({len(R[k]['items'])})" for k in have])
+    for tab, kind in zip(tabs, have):
+        with tab:
+            for i, q in enumerate(R[kind]["items"]):
+                k = f"w{R['id']}{kind}{R[kind]['gid']}_{i}"
+                (mc_card if kind == "mc" else es_card)(k, i, q, topic, wf)
+
+
+# ── Sơ đồ tư duy ──
 def to_dot(tree):
     pal = ["#0F5C5A", "#B4531F", "#4F6D3A", "#8A6A12", "#2F5D8C", "#8A3B4E"]
     cnt = [0]
@@ -931,38 +1239,208 @@ def outline(n, d=0):
     return s + "".join(outline(c, d + 1) for c in (n.get("con") or []) if d < 3)
 
 
-def page_map():
-    head("Bản đồ tư duy", "AI hệ thống hoá một chủ đề thành sơ đồ: khái niệm, công thức, dạng bài, sai lầm thường gặp.")
+def map_block(wf, R, topic):
     with st.container(border=True):
-        topic = topic_pick("m")
-        if st.button("Tạo bản đồ tư duy", icon=":material/account_tree:", type="primary", key="b_m"):
-            with st.spinner("Đang vẽ bản đồ..."):
-                t = ask_json(SYS_MAP, f"Chủ đề: {topic}", max_tokens=2500)
+        sec("Sơ đồ tư duy")
+        st.caption("Hệ thống hoá: khái niệm, công thức, dạng bài, sai lầm thường gặp, ứng dụng và liên hệ.")
+        focus = "khái niệm" if wf == "concept" else "định lí, công thức"
+
+        def run():
+            t = ask_json(SYS_MAP, f"Chủ đề ({focus}): {topic}", max_tokens=2500)
             if isinstance(t, dict) and t.get("ten"):
-                S.r_map = t
-            elif t is not None:
-                st.error("Không tạo được bản đồ. Hãy thử lại.")
-    t = S.get("r_map")
+                return t
+            if t is not None:
+                st.error("Không tạo được sơ đồ. Hãy thử lại.")
+            return None
+
+        ai_button(R, "map", "Vẽ sơ đồ tư duy", ":material/account_tree:", run, primary=False)
+    t = R.get("map")
     if t:
-        st.graphviz_chart(to_dot(t))
+        try:
+            st.graphviz_chart(to_dot(t))
+        except Exception:
+            st.info("Không hiển thị được dạng sơ đồ trên thiết bị này, xem dạng danh sách bên dưới.")
         with st.expander("Dạng danh sách (dễ đọc trên điện thoại)"):
             st.markdown(outline(t))
+        st.download_button("Tải sơ đồ (.md)", outline(t), file_name="so_do_tu_duy.md", mime="text/markdown",
+                           icon=":material/download:", key=f"dl_{R['id']}_map")
+
+
+# ───────────────────────── QUY TRÌNH HỌC KHÁI NIỆM / HỌC ĐỊNH LÍ ─────────────────────────
+def page_learn(wf):
+    with st.container(border=True):
+        topic = topic_pick(wf)
+    R = wf_state(wf, topic)
+    cur = step_nav(wf)
+    q = f"Chủ đề: {topic}"
+    if wf == "concept":
+        if cur == 1:
+            ai_button(R, "c1", "Gợi mở tình huống tiếp cận", ":material/explore:",
+                      lambda: ask_cached(SYS_C1, q, max_tokens=1400))
+            if R.get("c1"):
+                result_box("Tiếp cận khái niệm", R["c1"])
+                st.text_area("Ghi lại dự đoán của bạn (không bắt buộc, chỉ lưu trong phiên)", key=f"w{R['id']}_guess",
+                             height=90, max_chars=1500)
+        elif cur == 2:
+            ai_button(R, "c2", "Xem thẻ khái niệm", ":material/style:", lambda: ask_cached(SYS_C2, q, max_tokens=1800))
+            if R.get("c2"):
+                result_box("Thẻ khái niệm", R["c2"])
+            self_check(wf, R, topic)
+        elif cur == 3:
+            oral_block(wf, R, topic)
+        else:
+            practice_block(wf, R, topic)
+            map_block(wf, R, topic)
+    else:
+        if cur == 1:
+            a, b = st.columns(2)
+            with a:
+                ai_button(R, "t1", "Tính thử và dự đoán", ":material/science:",
+                          lambda: ask_cached(SYS_T1, q, max_tokens=1400))
+            with b:
+                ai_button(R, "t2", "Xem phát biểu định lí", ":material/gavel:",
+                          lambda: ask_cached(SYS_T2, q, max_tokens=1800), primary=bool(R.get("t1")))
+            if R.get("t1"):
+                result_box("Tiếp cận định lí", R["t1"])
+            if R.get("t2"):
+                result_box("Phát biểu định lí", R["t2"])
+            self_check(wf, R, topic)
+        elif cur == 2:
+            a, b = st.columns(2)
+            with a:
+                ai_button(R, "t3h", "Gợi mở chứng minh", ":material/psychology:",
+                          lambda: ask_cached(SYS_T3_HINT, q, max_tokens=1500, think="medium"))
+            with b:
+                ai_button(R, "t3f", "Xem chứng minh đầy đủ", ":material/menu_book:",
+                          lambda: ask_cached(SYS_T3_FULL, q, max_tokens=2500, think="medium"), primary=False)
+            if R.get("t3h"):
+                result_box("Hướng dẫn chứng minh", R["t3h"])
+            if R.get("t3f"):
+                with st.expander("Chứng minh đầy đủ", expanded=True):
+                    st.markdown(R["t3f"])
+            st.text_area("Tự viết chứng minh của bạn (nháp, chỉ lưu trong phiên)", key=f"w{R['id']}_proof",
+                         height=120, max_chars=4000)
+        elif cur == 3:
+            oral_block(wf, R, topic)
+        else:
+            practice_block(wf, R, topic)
+            map_block(wf, R, topic)
+    step_footer(wf, cur)
+
+
+# ───────────────────────── QUY TRÌNH GIẢI TOÁN ─────────────────────────
+def load_problem(text):
+    """Đưa một bài tương tự vào ô đề bài và quay về bước 1."""
+    S.s_prob = text
+    S.s_pfn = S.get("s_pfn", 0) + 1  # đổi key để xoá tệp đề cũ
+    S.pop("solve_R", None)
+    S.solve_step = 1
+
+
+def page_solve():
+    ftypes = ["png", "jpg", "jpeg", "pdf"]
+    with st.container(border=True):
+        sec("Đề bài")
+        a, b = st.columns([1.5, 1], gap="large")
+        prob = a.text_area("Nhập đề bài", key="s_prob", height=140, max_chars=4000, label_visibility="collapsed",
+                           placeholder="Ví dụ: Một hộp có 5 bi đỏ và 3 bi xanh. Lấy ngẫu nhiên 2 bi...")
+        pf = b.file_uploader("Hoặc tải ảnh/PDF đề bài", type=ftypes, accept_multiple_files=True,
+                             key=f"s_pf{S.get('s_pfn', 0)}")
+    sig = hashlib.sha1((prob.strip() + "|" + "|".join(f"{f.name}{f.size}" for f in pf or [])).encode()).hexdigest()
+    R = S.get("solve_R")
+    if not R or R.get("sig") != sig:
+        if R:
+            clear_prefix(f"w{R['id']}")
+        R = S.solve_R = {"sig": sig, "id": _token(), "wf": "solve"}
+    has_p = bool(prob.strip() or pf)
+    cur = step_nav("solve")
+    if not has_p:
+        st.info("Nhập hoặc tải đề bài ở khung phía trên để bắt đầu.")
+        step_footer("solve", cur)
+        return
+
+    if cur == 1:
+        st.markdown("Tự trả lời trước: **Đề cho gì? Hỏi gì? Kí hiệu các biến cố, đại lượng thế nào?** "
+                    "Sau đó đối chiếu với phần phân tích của AI.")
+        st.text_area("Phân tích của bạn (nháp)", key=f"w{R['id']}_s1", height=100, max_chars=2000)
+        ai_button(R, "s1", "Phân tích đề cùng AI", ":material/search:",
+                  lambda: ask_cached(SYS_S1, build(prob, pf), max_tokens=1400))
+        if R.get("s1"):
+            result_box("Tìm hiểu đề", R["s1"])
+    elif cur == 2:
+        st.text_area("Dàn ý lời giải của bạn (nháp)", key=f"w{R['id']}_s2", height=100, max_chars=2000)
+        ai_button(R, "s2", "Gợi ý chiến lược giải", ":material/lightbulb:",
+                  lambda: ask_cached(SYS_HINT, build(prob, pf), max_tokens=1800, think="medium"))
+        if R.get("s2"):
+            result_box("Chương trình giải", R["s2"])
+    elif cur == 3:
+        with st.container(border=True):
+            sec("Bài làm của bạn")
+            a, b = st.columns([1.5, 1], gap="large")
+            wt = a.text_area("Gõ bài làm", key=f"w{R['id']}_wt", height=170, max_chars=4000)
+            wf_ = b.file_uploader("Hoặc tải ảnh chụp/PDF bài làm", type=ftypes, accept_multiple_files=True,
+                                  key=f"w{R['id']}_wf")
+            if st.button("Chấm bài", icon=":material/task_alt:", type="primary", key=f"b_{R['id']}_grade"):
+                if not (wt.strip() or wf_):
+                    st.warning("Hãy gõ hoặc tải bài làm của bạn.")
+                else:
+                    with st.spinner("Đang đọc bài làm và chấm điểm..."):
+                        g = ask_json(SYS_GRADE, build(prob, pf, wt, wf_), max_tokens=3500, think="medium")
+                    if g:
+                        if g != R.get("grade"):  # bấm chấm lại y hệt: dùng kết quả cũ, không ghi hồ sơ lần nữa
+                            log_grade("solve", g)
+                        R["grade"] = g
+        if R.get("grade"):
+            with st.container(border=True):
+                st.markdown("#### Kết quả chấm")
+                show_grade(R["grade"])
+                st.caption("Sửa bài theo nhận xét rồi chấm lại, hoặc sang bước 4 để đối chiếu và mở rộng.")
+    else:
+        a, b = st.columns(2)
+        with a:
+            ai_button(R, "sol", "Bài giải chi tiết và nhìn lại", ":material/menu_book:",
+                      lambda: ask_cached(SYS_SOL, build(prob, pf), max_tokens=3500, think="medium"), primary=False)
+        with b:
+            ai_button(R, "sim", "Tạo bài tập tương tự", ":material/library_add:",
+                      lambda: ask_json(SYS_SIMILAR, build(prob, pf), max_tokens=4500, think="medium"))
+        if R.get("sol"):
+            result_box("Bài giải chi tiết", R["sol"])
+        sim = R.get("sim")
+        if sim:
+            items = [x for x in (sim.get("bai") or []) if isinstance(x, dict) and x.get("de")][:3]
+            sec("Bài tập tương tự" + (f" · {sim['chu_de']}" if sim.get("chu_de") else ""))
+            for i, x in enumerate(items):
+                k = f"w{R['id']}_sim{i}"
+                with st.container(border=True):
+                    st.markdown(f"**Bài {i + 1}** · *{x.get('muc_do', '')}*\n\n{x['de']}")
+                    c1, c2, c3 = st.columns(3)
+                    c1.button("Luyện theo 4 bước", icon=":material/play_arrow:", type="primary", key=f"b_{k}_go",
+                              on_click=load_problem, args=(x["de"],))
+                    c2.button("Gợi ý", icon=":material/lightbulb:", key=f"b_{k}_h", on_click=toggle, args=(f"{k}_h",))
+                    c3.button("Lời giải", icon=":material/visibility:", key=f"b_{k}_s", on_click=toggle,
+                              args=(f"{k}_s",))
+                    if S.get(f"{k}_h"):
+                        st.info(x.get("chien_luoc", ""))
+                    if S.get(f"{k}_s"):
+                        st.success(x.get("loi_giai", ""))
+    step_footer("solve", cur)
 
 
 # ───────────────────────── ĐĂNG NHẬP & KHUNG CHÍNH ─────────────────────────
+def brand():
+    st.markdown(f'<div class="brand"><span class="logo">{BELL}</span><span>XSTK Tutor'
+                '<small>Trợ giảng Xác suất thống kê</small></span></div>', unsafe_allow_html=True)
+
+
 def login():
-    l, r = st.columns([1.15, 1], gap="large")
-    with l:
-        st.markdown(
-            '<div class="eyebrow">Xác suất thống kê · Trợ lí học tập</div>'
-            '<h1>Học từng bước,<br>hiểu đến cùng.</h1>'
-            '<p class="lead">Chấm bài bằng ảnh chụp, luyện tập, vấn đáp và bản đồ tư duy. '
-            'Hồ sơ cá nhân ghi lại các lỗi sai của bạn để đề xuất cách học cải thiện.</p>',
-            unsafe_allow_html=True)
-    with r, st.container(border=True):
+    brand()
+    hero()
+    _, mid, _ = st.columns([1, 1.6, 1])
+    with mid, st.container(border=True):
+        sec("Bắt đầu học")
         with st.form("login"):
-            name = st.text_input("Tên của bạn", max_chars=40)
-            go = st.form_submit_button("Vào học", type="primary")
+            name = st.text_input("Tên của bạn", max_chars=40, placeholder="Ví dụ: Nguyễn An")
+            go = st.form_submit_button("Vào học", type="primary", icon=":material/login:")
         if go:
             if name.strip():
                 S.user, S.profile = name.strip(), load_profile(name.strip())  # shortcut: chỉ dùng tên, chưa có mật khẩu
@@ -973,8 +1451,8 @@ def login():
             if up:
                 try:
                     p = json.load(up)
-                    assert isinstance(p.get("events"), list) and str(p.get("name", "")).strip()
-                except (ValueError, AssertionError, AttributeError):
+                    assert isinstance(p, dict) and isinstance(p.get("events"), list) and str(p.get("name", "")).strip()
+                except (ValueError, AssertionError, AttributeError, UnicodeDecodeError):
                     st.error("Tệp hồ sơ không hợp lệ.")
                 else:
                     p["name"] = str(p["name"]).strip()[:40]
@@ -983,36 +1461,50 @@ def login():
                     st.rerun()
 
 
-PAGES = {"Chấm bài": page_tutor, "Luyện tập": page_practice, "Vấn đáp": page_oral, "Sơ đồ tư duy": page_map}
+def footer():
+    src = _key_and_source()[1]
+    st.markdown(
+        '<div class="foot"><span>XSTK Tutor · Học khái niệm · Học định lí · Giải toán 4 bước</span>'
+        f'<span>{"AI sẵn sàng (" + src + ")" if src else "AI chưa được cấu hình"}</span></div>',
+        unsafe_allow_html=True)
 
 
 def main():
-    st.set_page_config(page_title="XSTK Tutor", page_icon=":material/functions:", layout="wide",
-                       initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="XSTK Tutor · Trợ giảng Xác suất thống kê", page_icon=":material/bar_chart:",
+                       layout="wide", initial_sidebar_state="collapsed")
     st.markdown(CSS, unsafe_allow_html=True)
     if not S.get("user"):
         login()
+        footer()
         return
-    a, b, c = st.columns([5, 1.5, 1.5], vertical_alignment="center")
-    a.markdown('<div class="eyebrow">Xác suất thống kê · Trợ lí học tập</div><h1>Học từng bước,<br>hiểu đến cùng.</h1>',
-               unsafe_allow_html=True)
-    if b.button("Hồ sơ học tập", icon=":material/person:", type="primary", key="b_prof"):
+    a, b, c = st.columns([5, 1.7, 1.4], vertical_alignment="center")
+    with a:
+        brand()
+    if b.button("Hồ sơ học tập", icon=":material/insights:", type="primary", key="b_prof"):
         profile_dialog()
     with c.popover(S.user, icon=":material/account_circle:"):
         st.download_button("Tải hồ sơ (.json)", json.dumps(S.profile, ensure_ascii=False),
-                           file_name="ho_so_xstk.json", mime="application/json")
-        if st.button("Đổi người dùng", key="b_out"):
+                           file_name="ho_so_xstk.json", mime="application/json", icon=":material/download:")
+        if st.button("Đổi người dùng", key="b_out", icon=":material/logout:"):
             for k in list(S.keys()):
                 del S[k]
             st.rerun()
+    hero()
     if not _has_key():
-        st.warning("Chưa cấu hình API key: các tính năng AI tạm thời chưa hoạt động.")
-    nav = st.segmented_control("Chức năng", list(PAGES), default="Chấm bài", key="nav", label_visibility="collapsed")
+        st.warning("Chưa cấu hình GEMINI_API_KEY (GitHub Secrets hoặc Streamlit Secrets): các tính năng AI tạm thời chưa hoạt động.")
+    if S.get("wf_nav") not in WF:
+        S.wf_nav = S.get("wf_last", "concept")
+    st.segmented_control("Quy trình", list(WF), key="wf_nav", label_visibility="collapsed",
+                         format_func=lambda k: f"{WF[k]['icon']} {WF[k]['name']}")
+    wf = S.get("wf_nav") or S.get("wf_last", "concept")
+    S.wf_last = wf
     left = max(0, USER_DAILY - shared().used_of(("u", S.user.lower())))
-    st.caption(f"Lượt AI còn lại hôm nay của bạn: {left}/{USER_DAILY}. Câu hỏi trùng với người khác được dùng lại, không tốn lượt.")
-    if nav:
-        S.last_nav = nav
-    PAGES[S.get("last_nav", "Chấm bài")]()
+    st.caption(f"Lượt AI còn lại hôm nay của bạn: {left}/{USER_DAILY}. Nội dung trùng với người khác được dùng lại, không tốn lượt.")
+    if wf == "solve":
+        page_solve()
+    else:
+        page_learn(wf)
+    footer()
 
 
 main()
