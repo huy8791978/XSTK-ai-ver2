@@ -2,3 +2,6 @@ streamlit>=1.41
 google-genai>=1.0
 pandas
 Pillow
+numpy>=1.26
+scipy>=1.11
+plotly>=5.20
