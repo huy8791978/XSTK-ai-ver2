@@ -3,14 +3,19 @@ XSTK Tutor - trợ lí AI học Xác suất thống kê (Streamlit).
 Chạy thử : streamlit run app.py
 Triển khai: Streamlit Community Cloud, Main file path = app.py
 """
+import copy
 import hashlib
 import io
 import json
+import random
 import re
 import textwrap
+import threading
+import time
 import datetime as dt
-from collections import Counter
+from collections import Counter, OrderedDict, deque
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -19,11 +24,23 @@ from google.genai import errors, types
 from PIL import Image, ImageOps
 
 # ───────────────────────── CẤU HÌNH ─────────────────────────
-MODEL = "gemini-3.5-flash-lite"  # đổi sang "gemini-2.5-pro" nếu cần chấm kĩ hơn (chậm và đắt hơn)
+MODEL = "gemini-3.5-flash-lite"
 # Cách 1 (khuyên dùng): đặt GEMINI_API_KEY trong Streamlit Cloud > Settings > Secrets.
 # Cách 2: dán khóa (dạng AIza...) vào dòng dưới. Chỉ làm vậy khi repo GitHub ở chế độ PRIVATE:
 # khóa nằm trong repo public sẽ bị lộ và bị thu hồi.
 EMBEDDED_KEY = "DAN_API_KEY_VAO_DAY"
+
+# ── Hạn mức gói free của AI Studio cho Gemini 3.5 Flash Lite: RPM 15 · TPM 250k · RPD 500.
+# Ngưỡng dưới đây đặt thấp hơn hạn mức thật để chừa biên an toàn (đồng hồ Google lệch, app khác dùng chung key).
+RPM_CAP = 12            # số lượt gọi tối đa trong 60 giây, toàn hệ thống
+TPM_CAP = 200_000       # token (đầu vào + đầu ra ước lượng) tối đa trong 60 giây
+RPD_CAP = 450           # số lượt gọi tối đa mỗi ngày (reset 0h giờ Thái Bình Dương, khoảng 14-15h giờ Việt Nam)
+USER_DAILY = 30         # lượt AI tối đa mỗi người mỗi ngày
+IP_DAILY = 90           # lượt AI tối đa mỗi địa chỉ mạng mỗi ngày (cả lớp có thể dùng chung wifi)
+QUEUE_MAX = 40          # giây tối đa một yêu cầu chịu xếp hàng trước khi báo bận
+CACHE_TTL = 24 * 3600   # bộ nhớ chung giữ kết quả 24 giờ
+POOL_SIZE = 3           # mỗi (chủ đề, mức độ) chỉ sinh tối đa 3 bộ đề, người sau dùng lại
+HEAD = {"minimal": 0, "medium": 6000, "high": 12000}  # chỗ chừa cho token "suy nghĩ" (tính vào max_output_tokens)
 PROFILE_DIR = Path("profiles")  # shortcut: đĩa của Streamlit Cloud bị xoá khi app khởi động lại, nên có nút tải/khôi phục hồ sơ
 
 TOPICS = [
@@ -84,18 +101,15 @@ SYS_GRADE = BASE + (
 _PRACTICE = (
     "Soạn bài tập XSTK bám sát chương trình, số liệu cụ thể, đủ dữ kiện, giải được, có lời giải đúng. "
 )
-SYS_MC = BASE + _PRACTICE + (
-    "Soạn đúng 5 câu trắc nghiệm 4 phương án; trộn nhận diện khái niệm và vận dụng. Phương án nhiễu phản ánh sai lầm "
-    "phổ biến. Vị trí đáp án đúng phân bố ngẫu nhiên giữa A-D. 'chien_luoc' là gợi ý theo bước 1-2 của quy trình giải, "
-    "TUYỆT ĐỐI không tiết lộ đáp án hay kết quả số. 'sai_lam' chỉ gồm các phương án sai." + JSON_RULE +
-    ' Cấu trúc: {"cau":[{"de":"...","lua_chon":{"A":"..","B":"..","C":"..","D":".."},"dap_an":"B",'
+SYS_PRACTICE = BASE + _PRACTICE + (
+    "Soạn MỘT bộ gồm đúng 5 câu trắc nghiệm và 5 câu tự luận. Trắc nghiệm: 4 phương án, trộn nhận diện khái niệm và vận dụng, "
+    "phương án nhiễu phản ánh sai lầm phổ biến, vị trí đáp án đúng phân bố ngẫu nhiên giữa A-D, 'sai_lam' chỉ gồm các phương án sai. "
+    "Tự luận: 2 cơ bản, 2 trung bình, 1 gắn thực tiễn, 'tieu_chi' là thang điểm 10 tham khảo. 'chien_luoc' của mọi câu theo bước 1-2 "
+    "của quy trình giải, TUYỆT ĐỐI không tiết lộ đáp án hay kết quả số. Kiểm tra kĩ đáp án trước khi trả lời." + JSON_RULE +
+    ' Cấu trúc: {"trac_nghiem":[{"de":"...","lua_chon":{"A":"..","B":"..","C":"..","D":".."},"dap_an":"B",'
     '"chien_luoc":"...","loi_giai":"lời giải chi tiết nêu rõ đáp án","sai_lam":{"A":{"loai":"(một trong: '
-    + "; ".join(ERR) + ')","mo_ta":"vì sao học sinh hay chọn nhầm"}}}]}'
-)
-SYS_ES = BASE + _PRACTICE + (
-    "Soạn đúng 5 câu tự luận: 2 cơ bản, 2 trung bình, 1 gắn thực tiễn. 'chien_luoc' theo bước 1-2 của quy trình giải, "
-    "TUYỆT ĐỐI không tiết lộ kết quả. 'tieu_chi' là thang điểm 10 tham khảo." + JSON_RULE +
-    ' Cấu trúc: {"cau":[{"de":"...","chien_luoc":"...","loi_giai":"lời giải chi tiết 4 bước","tieu_chi":"..."}]}'
+    + "; ".join(ERR) + ')","mo_ta":"vì sao học sinh hay chọn nhầm"}}}],'
+    '"tu_luan":[{"de":"...","chien_luoc":"...","loi_giai":"lời giải chi tiết 4 bước","tieu_chi":"..."}]}'
 )
 ORAL_CONCEPT = (
     "Thứ tự 5 câu hỏi (học khái niệm): (1) phát biểu định nghĩa và dấu hiệu bản chất; (2) thuật ngữ, kí hiệu then chốt "
@@ -130,6 +144,155 @@ SYS_PLAN = BASE + (
 S = st.session_state
 
 
+# ───────────────────────── BỘ ĐIỀU TIẾT HẠN MỨC (DÙNG CHUNG MỌI NGƯỜI) ─────────────────────────
+def _day():
+    try:
+        tz = ZoneInfo("America/Los_Angeles")
+    except Exception:
+        tz = dt.timezone(dt.timedelta(hours=-8))
+    return dt.datetime.now(tz).date().isoformat()
+
+
+class Shared:
+    """Một đối tượng duy nhất cho cả tiến trình (st.cache_resource): đếm lượt gọi, hàng đợi, bộ nhớ đệm, kho đề.
+    shortcut: nằm trong RAM, mất khi app khởi động lại (khi đó bộ đếm về 0, nên ngưỡng mới chừa biên an toàn)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.calls, self.toks = deque(), deque()
+        self.day, self.rpd, self.block_until, self.used = _day(), 0, 0.0, {}
+        self.cache, self.pool, self.flight = OrderedDict(), OrderedDict(), {}
+
+    def _roll(self, now):
+        d = _day()
+        if d != self.day:
+            self.day, self.rpd, self.used = d, 0, {}
+        while self.calls and now - self.calls[0] > 60:
+            self.calls.popleft()
+        while self.toks and now - self.toks[0][0] > 60:
+            self.toks.popleft()
+
+    def reserve(self, who, est):
+        """-> ("ok", mục_token) | ("wait", giây) | ("day", 0) | ("user", loại). Chỉ tính lượt khi trả về ok."""
+        now = time.time()
+        with self.lock:
+            self._roll(now)
+            if self.rpd >= RPD_CAP:
+                return "day", 0
+            for k, cap in who:
+                if self.used.get(k, 0) >= cap:
+                    return "user", k[0]
+            if now < self.block_until:
+                return "wait", self.block_until - now
+            if len(self.calls) >= RPM_CAP:
+                return "wait", self.calls[0] + 60 - now
+            if self.toks and sum(t for _, t in self.toks) + est > TPM_CAP:
+                return "wait", self.toks[0][0] + 60 - now
+            self.calls.append(now)
+            entry = [now, est]
+            self.toks.append(entry)
+            self.rpd += 1
+            for k, _ in who:
+                self.used[k] = self.used.get(k, 0) + 1
+            return "ok", entry
+
+    def settle(self, entry, actual):
+        with self.lock:
+            entry[1] = actual  # thay ước lượng bằng số token thật Google báo về
+
+    def penalize(self, seconds, day=False):
+        with self.lock:
+            self.block_until = time.time() + seconds
+            if day:
+                self.rpd = RPD_CAP
+
+    def used_of(self, k):
+        with self.lock:
+            self._roll(time.time())
+            return self.used.get(k, 0)
+
+    def cget(self, k):
+        with self.lock:
+            v = self.cache.get(k)
+            return copy.deepcopy(v[1]) if v and time.time() - v[0] < CACHE_TTL else None
+
+    def cput(self, k, val):
+        with self.lock:
+            self.cache[k] = (time.time(), copy.deepcopy(val))
+            self.cache.move_to_end(k)
+            while len(self.cache) > 400:
+                self.cache.popitem(last=False)
+
+    def flight_lock(self, k):
+        with self.lock:
+            return self.flight.setdefault(k, threading.Lock())
+
+    def pool_get(self, k):
+        with self.lock:
+            return list(self.pool.get(k, []))
+
+    def pool_add(self, k, item):
+        with self.lock:
+            self.pool.setdefault(k, []).append(item)
+            while len(self.pool) > 200:
+                self.pool.popitem(last=False)
+
+
+@st.cache_resource
+def shared():
+    return Shared()
+
+
+def _ip():
+    try:
+        return st.context.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    except Exception:
+        return ""
+
+
+def est_tokens(system, content, msgs):
+    n = len(system) / 2.5  # tiếng Việt tốn token hơn tiếng Anh nên chia 2.5 (ước lượng nhiều lên cho an toàn)
+    items = [m["content"] for m in msgs] if msgs else (content if isinstance(content, list) else [content])
+    for p in items:
+        if isinstance(p, str):
+            n += len(p) / 2.5
+        elif getattr(p, "text", None):
+            n += len(p.text) / 2.5
+        elif getattr(p, "inline_data", None):
+            n += 6000 if p.inline_data.mime_type == "application/pdf" else 1500
+    return int(n)
+
+
+def _digest(system, content, tag):
+    h = hashlib.sha256()
+    for x in (MODEL, system, tag):
+        h.update(x.encode())
+    for p in content if isinstance(content, list) else [content]:
+        if isinstance(p, str):
+            h.update(p.encode())
+        elif getattr(p, "text", None) is not None:
+            h.update(p.text.encode())
+        else:
+            h.update(p.inline_data.data)
+    return h.hexdigest()
+
+
+def memo(key, fn):
+    """Có kết quả cũ thì dùng lại (không tốn lượt). Nhiều người hỏi cùng lúc một thứ thì chỉ gọi AI một lần."""
+    sh = shared()
+    v = sh.cget(key)
+    if v is not None:
+        return v
+    with sh.flight_lock(key):
+        v = sh.cget(key)
+        if v is None:
+            v = fn()
+            if v is not None:
+                sh.cput(key, v)
+        sh.flight.pop(key, None)
+        return v
+
+
 # ───────────────────────── GỌI AI (GEMINI) ─────────────────────────
 def _key():
     try:
@@ -148,24 +311,46 @@ def _client(key):
     return genai.Client(api_key=key, http_options=types.HttpOptions(timeout=180_000))
 
 
-def ask(system, content=None, msgs=None, max_tokens=3000, json_mode=False):
-    """Trả về text, hoặc None (đã hiện lỗi thân thiện, không lộ khóa)."""
+def ask(system, content=None, msgs=None, max_tokens=3000, think="minimal", json_mode=False):
+    """Một lượt gọi thật tới Gemini, đi qua bộ điều tiết. Trả về text hoặc None (đã báo lỗi, không lộ khóa)."""
     if not _has_key():
         st.error("Chưa cấu hình API key. Quản trị viên cần thêm khóa vào Secrets hoặc vào mã nguồn.")
         return None
+    sh, ip = shared(), _ip()
+    who = [(("u", (S.get("user") or "?").lower()), USER_DAILY)] + ([(("ip", ip), IP_DAILY)] if ip else [])
+    est = est_tokens(system, content, msgs) + max_tokens + HEAD[think]
+    state, h = sh.reserve(who, est)
+    if state == "wait":
+        with st.spinner("Hệ thống đang đông, bạn đang được xếp hàng..."):
+            end = time.time() + QUEUE_MAX
+            while state == "wait" and time.time() < end:
+                time.sleep(min(max(h, 0.3), 1.5))
+                state, h = sh.reserve(who, est)
+    if state == "wait":
+        st.error("Hệ thống đang rất đông. Hãy thử lại sau ít phút.")
+        return None
+    if state == "day":
+        st.error("Hệ thống đã dùng hết hạn mức AI của hôm nay. Hạn mức làm mới khoảng 14-15h (giờ Việt Nam).")
+        return None
+    if state == "user":
+        st.error(f"Bạn đã dùng hết {USER_DAILY} lượt AI hôm nay. Hãy quay lại vào ngày mai." if h == "u"
+                 else "Mạng bạn đang dùng đã hết lượt AI hôm nay. Hãy quay lại vào ngày mai.")
+        return None
     if msgs:
         content = [types.Content(role="model" if m["role"] == "assistant" else "user",
-                                 parts=[types.Part(text=m["content"])]) for m in msgs]
+                                 parts=[types.Part(text=m["content"])]) for m in msgs]  # lượt cuối luôn là "user"
     cfg = types.GenerateContentConfig(
-        system_instruction=system,
-        max_output_tokens=min(max_tokens * 3, 60000),  # shortcut: Gemini 2.5 tính cả token "suy nghĩ" vào giới hạn, nên nhân 3
+        system_instruction=system, max_output_tokens=max_tokens + HEAD[think],
+        thinking_config=types.ThinkingConfig(thinking_level=think),
         response_mime_type="application/json" if json_mode else None)
     try:
         r = _client(_key()).models.generate_content(model=MODEL, contents=content, config=cfg)
     except errors.APIError as e:
         code = getattr(e, "code", None)
         if code == 429:
-            st.error("Hệ thống đang quá tải hoặc hết hạn mức. Hãy đợi ít giây rồi thử lại.")
+            daily = "perday" in str(e).lower().replace(" ", "")
+            sh.penalize(3600 if daily else 45, day=daily)
+            st.error("AI đã hết hạn mức hôm nay." if daily else "AI đang quá tải. Hãy đợi khoảng 1 phút rồi thử lại.")
         elif code in (400, 401, 403):
             st.error(f"Yêu cầu bị từ chối (mã {code}). Kiểm tra API key hoặc tệp tải lên.")
         else:
@@ -173,10 +358,19 @@ def ask(system, content=None, msgs=None, max_tokens=3000, json_mode=False):
     except Exception as e:
         st.error(f"Lỗi kết nối AI ({type(e).__name__}). Hãy thử lại.")
     else:
+        used = getattr(getattr(r, "usage_metadata", None), "total_token_count", None)
+        if used:
+            sh.settle(h, used)
         if r.text:
             return r.text.strip()
         st.error("AI không trả lời (có thể do bộ lọc an toàn hoặc bị cắt). Hãy diễn đạt lại và thử lại.")
     return None
+
+
+def ask_cached(system, content, max_tokens=3000, think="minimal"):
+    """Văn bản trả lời, dùng lại kết quả của người khác nếu đề y hệt."""
+    return memo(_digest(system, content, f"t{think}{max_tokens}"),
+                lambda: ask(system, content, max_tokens=max_tokens, think=think))
 
 
 def _fix(o):
@@ -190,17 +384,20 @@ def _fix(o):
     return o
 
 
-def ask_json(system, content, max_tokens=3000):
-    for _ in range(2):
-        t = ask(system, content, max_tokens=max_tokens, json_mode=True)
-        if t is None:
-            return None
-        try:
-            return _fix(json.loads(t[t.index("{"): t.rindex("}") + 1], strict=False))
-        except ValueError:
-            continue
-    st.error("AI trả về dữ liệu không đọc được. Hãy thử lại.")
-    return None
+def ask_json(system, content, max_tokens=3000, think="minimal", cache=True):
+    def run():
+        for _ in range(2):
+            t = ask(system, content, max_tokens=max_tokens, think=think, json_mode=True)
+            if t is None:
+                return None
+            try:
+                return _fix(json.loads(t[t.index("{"): t.rindex("}") + 1], strict=False))
+            except ValueError:
+                continue
+        st.error("AI trả về dữ liệu không đọc được. Hãy thử lại.")
+        return None
+
+    return memo(_digest(system, content, f"j{think}{max_tokens}"), run) if cache else run()
 
 
 # ───────────────────────── FILE / OCR ─────────────────────────
@@ -211,11 +408,13 @@ def _T(s):
 def fblocks(files):
     """Ảnh -> JPEG thu nhỏ (ảnh điện thoại rất nặng); PDF gửi nguyên. Gemini đọc chữ viết tay (OCR)."""
     out = []
-    for f in files or []:
+    if files and len(files) > 3:
+        st.warning("Chỉ dùng 3 tệp đầu tiên để tiết kiệm lượt AI.")
+    for f in (files or [])[:3]:
         data = f.getvalue()
         if f.name.lower().endswith(".pdf"):
-            if len(data) > 20_000_000:
-                st.warning(f"{f.name} lớn hơn 20 MB, bỏ qua.")
+            if len(data) > 10_000_000:
+                st.warning(f"{f.name} lớn hơn 10 MB, bỏ qua.")
                 continue
             out.append(types.Part.from_bytes(data=data, mime_type="application/pdf"))
             continue
@@ -351,7 +550,7 @@ def profile_dialog():
                 "lo_hong_hay_gap": dict(gaps.most_common(8)),
                 "sai_lam_gan_day": [x.get("mo_ta", "") for x in all_err[-6:]]}
         with st.spinner("Đang phân tích hồ sơ..."):
-            S.r_plan = ask(SYS_PLAN, json.dumps(data, ensure_ascii=False), max_tokens=1500)
+            S.r_plan = ask_cached(SYS_PLAN, json.dumps(data, ensure_ascii=False), max_tokens=1500)
     if S.get("r_plan"):
         st.markdown(S.r_plan)
 
@@ -430,11 +629,11 @@ def page_tutor():
         a, b = st.columns(2, gap="large")
         with a:
             st.markdown("**1. Đề bài**")
-            prob = st.text_area("Nhập đề bài", key="t_prob", height=150)
+            prob = st.text_area("Nhập đề bài", key="t_prob", height=150, max_chars=4000)
             pf = st.file_uploader("Hoặc tải ảnh/PDF đề bài", type=types, accept_multiple_files=True, key="t_pf")
         with b:
             st.markdown("**2. Bài làm của bạn**")
-            wt = st.text_area("Gõ bài làm (không bắt buộc)", key="t_wt", height=150)
+            wt = st.text_area("Gõ bài làm (không bắt buộc)", key="t_wt", height=150, max_chars=4000)
             wf = st.file_uploader("Tải ảnh chụp/PDF bài làm", type=types, accept_multiple_files=True, key="t_wf")
         has_p, has_w = bool(prob.strip() or pf), bool(wt.strip() or wf)
         c1, c2, c3 = st.columns(3)
@@ -443,22 +642,23 @@ def page_tutor():
                 st.warning("Hãy nhập hoặc tải đề bài trước.")
             else:
                 with st.spinner("Đang phân tích đề..."):
-                    S.r_hint = ask(SYS_HINT, build(prob, pf), max_tokens=1800)
+                    S.r_hint = ask_cached(SYS_HINT, build(prob, pf), max_tokens=1800, think="medium")
         if c2.button("Chấm bài", icon=":material/task_alt:", type="primary", key="b_t_grade"):
             if not (has_p and has_w):
                 st.warning("Cần có cả đề bài và bài làm.")
             else:
                 with st.spinner("Đang đọc bài làm và chấm điểm..."):
-                    g = ask_json(SYS_GRADE, build(prob, pf, wt, wf), max_tokens=3500)
+                    g = ask_json(SYS_GRADE, build(prob, pf, wt, wf), max_tokens=3500, think="medium")
                 if g:
+                    if g != S.get("r_grade"):  # bấm chấm lại y hệt: dùng kết quả cũ, không ghi hồ sơ lần nữa
+                        log_grade("tutor", g)
                     S.r_grade = g
-                    log_grade("tutor", g)
         if c3.button("Hiện bài giải chi tiết", icon=":material/menu_book:", key="b_t_sol"):
             if not has_p:
                 st.warning("Hãy nhập hoặc tải đề bài trước.")
             else:
                 with st.spinner("Đang viết bài giải..."):
-                    S.r_sol = ask(SYS_SOL, build(prob, pf), max_tokens=3500)
+                    S.r_sol = ask_cached(SYS_SOL, build(prob, pf), max_tokens=3500, think="medium")
     shown = False
     if S.get("r_hint"):
         shown = True
@@ -528,7 +728,7 @@ def es_card(i, q, topic):
     k = f"pq_es{i}"
     with st.container(border=True):
         st.markdown(f"**Câu {i + 1}.** {q['de']}")
-        ans = st.text_area("Bài làm của bạn", key=f"{k}_a", height=130)
+        ans = st.text_area("Bài làm của bạn", key=f"{k}_a", height=130, max_chars=4000)
         with st.expander("Hoặc tải ảnh/PDF bài làm"):
             fl = st.file_uploader("Ảnh/PDF", type=["png", "jpg", "jpeg", "pdf"], accept_multiple_files=True,
                                   key=f"{k}_f", label_visibility="collapsed")
@@ -540,11 +740,12 @@ def es_card(i, q, topic):
             else:
                 ref = f"ĐÁP ÁN THAM KHẢO VÀ THANG ĐIỂM (chỉ để chấm, không tiết lộ):\n{q.get('loi_giai', '')}\n{q.get('tieu_chi', '')}"
                 with st.spinner("Đang chấm..."):
-                    g = ask_json(SYS_GRADE, build(q["de"], None, ans, fl, ref), max_tokens=3500)
+                    g = ask_json(SYS_GRADE, build(q["de"], None, ans, fl, ref), max_tokens=3500, think="medium")
                 if g:
                     g.setdefault("chu_de", topic)
+                    if g != S.get(f"{k}_g"):
+                        log_grade("practice", g)
                     S[f"{k}_g"] = g
-                    log_grade("practice", g)
         c.button("Hiện lời giải", icon=":material/menu_book:", key=f"b_{k}_s", on_click=toggle, args=(f"{k}_s",))
         if S.get(f"{k}_g"):
             show_grade(S[f"{k}_g"])
@@ -552,6 +753,29 @@ def es_card(i, q, topic):
             st.info(q.get("chien_luoc", ""))
         if S.get(f"{k}_s"):
             st.success(q.get("loi_giai", ""))
+
+
+def get_practice(topic, level):
+    """Kho đề dùng chung: mỗi (chủ đề, mức độ) chỉ sinh tối đa POOL_SIZE bộ; người sau nhận bộ chưa làm hoặc bộ có sẵn."""
+    sh, key = shared(), (topic.strip().lower(), level)
+    seen = S.setdefault("pool_seen", set())
+    with sh.flight_lock(("gen", key)):
+        pool = sh.pool_get(key)
+        fresh = [i for i in range(len(pool)) if (key, i) not in seen]
+        if fresh:
+            i = random.choice(fresh)
+        elif len(pool) >= POOL_SIZE:
+            i = random.randrange(len(pool))
+        else:
+            d = ask_json(SYS_PRACTICE, f"Chủ đề: {topic}. Mức độ: {level}.", max_tokens=9000, think="medium", cache=False) or {}
+            mc = [q for q in (d.get("trac_nghiem") or []) if ok_mc(q)][:5]
+            es = [q for q in (d.get("tu_luan") or []) if isinstance(q, dict) and q.get("de")][:5]
+            if not (mc or es):
+                return None
+            sh.pool_add(key, {"mc": mc, "es": es})
+            i = len(sh.pool_get(key)) - 1
+        seen.add((key, i))
+        return copy.deepcopy(sh.pool_get(key)[i])
 
 
 def page_practice():
@@ -565,15 +789,10 @@ def page_practice():
         if st.button("Tạo bộ 10 bài tập", icon=":material/auto_awesome:", type="primary", key="b_p_gen"):
             for kk in [x for x in S if x.startswith("pq_")]:
                 del S[kk]
-            req = f"Chủ đề: {topic}. Mức độ: {level}."
-            with st.spinner("Đang soạn 5 câu trắc nghiệm..."):
-                mc = ask_json(SYS_MC, req, max_tokens=7000)
-            with st.spinner("Đang soạn 5 câu tự luận..."):
-                es = ask_json(SYS_ES, req, max_tokens=7000)
-            mcq = [q for q in ((mc or {}).get("cau") or []) if ok_mc(q)][:5]
-            esq = [q for q in ((es or {}).get("cau") or []) if isinstance(q, dict) and q.get("de")][:5]
-            if mcq or esq:
-                S.r_pq = {"topic": topic, "mc": mcq, "es": esq}
+            with st.spinner("Đang chuẩn bị bộ bài tập..."):
+                item = get_practice(topic, level)
+            if item:
+                S.r_pq = {"topic": topic, "mc": item["mc"], "es": item["es"]}
             else:
                 st.error("Không tạo được bài tập. Hãy thử lại.")
     pq = S.get("r_pq")
@@ -590,20 +809,26 @@ def page_practice():
 
 
 # ───────────────────────── TRANG: VẤN ĐÁP ─────────────────────────
+def oral_first(topic, kind):
+    """Câu 1 lấy từ mẫu có sẵn, không tốn lượt AI."""
+    if kind.startswith("Khái"):
+        return f"Câu 1/5. Hãy phát biểu định nghĩa của «{topic}» bằng lời của bạn và nêu các dấu hiệu bản chất của khái niệm."
+    return f"Câu 1/5. Hãy phát biểu định lí hoặc công thức quan trọng nhất của chủ đề «{topic}»."
+
+
 def oral_sys(O):
     n = sum(m["role"] == "assistant" for m in O["msgs"])
     plan = ORAL_CONCEPT if O["kind"].startswith("Khái") else ORAL_THEOREM
     return BASE + (
         f"Bạn là giám khảo vấn đáp lí thuyết XSTK, chủ đề: {O['topic']}. {plan} "
-        "Mỗi lượt chỉ đặt MỘT câu hỏi ngắn, tổng cộng 5 câu theo thứ tự trên. Sau mỗi câu trả lời của học sinh, nhận xét "
-        "1-2 câu (đúng, chưa đủ hay sai ở đâu, có gợi mở), KHÔNG giảng đáp án đầy đủ, rồi hỏi câu tiếp theo. "
-        f"Đã hỏi {n} câu. Nếu học sinh vừa trả lời câu 5, chỉ nhận xét và nhắc bấm nút “Kết thúc và chấm điểm”. "
+        f"Học sinh vừa trả lời câu {n}/5. Hãy nhận xét 1-2 câu (đúng, chưa đủ hay sai ở đâu, có gợi mở), KHÔNG giảng đáp án "
+        f"đầy đủ, rồi hỏi duy nhất câu {n + 1}/5 theo đúng thứ tự trên, bắt đầu câu hỏi bằng \"Câu {n + 1}/5.\". "
         "Không cho điểm số trong lúc hỏi."
     )
 
 
 def page_oral():
-    head("Vấn đáp lí thuyết", "Giám khảo AI hỏi từng câu về khái niệm hoặc định lí. Cuối buổi AI chấm điểm và chỉ ra lỗ hổng kiến thức.")
+    head("Vấn đáp lí thuyết", "Giám khảo AI hỏi 5 câu về khái niệm hoặc định lí. Cuối buổi AI chấm điểm và chỉ ra lỗ hổng kiến thức.")
     with st.container(border=True):
         a, b = st.columns([2, 1], gap="large")
         with a:
@@ -611,10 +836,9 @@ def page_oral():
         with b:
             kind = st.radio("Dạng vấn đáp", ["Khái niệm", "Định lí, công thức"], key="o_kind")
         if st.button("Bắt đầu vấn đáp mới", icon=":material/record_voice_over:", type="primary", key="b_o_start"):
-            O = {"topic": topic, "kind": kind, "msgs": [{"role": "user", "content": "Hãy bắt đầu vấn đáp."}], "res": None}
-            with st.spinner("Giám khảo đang chuẩn bị câu hỏi..."):
-                r = ask(oral_sys(O), msgs=O["msgs"], max_tokens=700)
-            S.oral = {**O, "msgs": O["msgs"] + [{"role": "assistant", "content": r}]} if r else None
+            S.oral = {"topic": topic, "kind": kind, "res": None,
+                      "msgs": [{"role": "user", "content": "Hãy bắt đầu vấn đáp."},
+                               {"role": "assistant", "content": oral_first(topic, kind)}]}
     O = S.get("oral")
     if not O:
         st.info("Chọn chủ đề và dạng vấn đáp, rồi bấm “Bắt đầu vấn đáp mới”.")
@@ -623,24 +847,30 @@ def page_oral():
     for m in O["msgs"][1:]:
         st.chat_message(m["role"]).markdown(m["content"])
     done = bool(O.get("res"))
-    p = st.chat_input("Nhập câu trả lời của bạn...", disabled=done)
+    answered = sum(m["role"] == "user" for m in O["msgs"]) - 1
+    p = st.chat_input("Nhập câu trả lời của bạn...", disabled=done or answered >= 5, max_chars=1200)
     if p:
         O["msgs"].append({"role": "user", "content": p})
         st.chat_message("user").markdown(p)
-        with st.chat_message("assistant"):
-            with st.spinner("Giám khảo đang nhận xét..."):
-                r = ask(oral_sys(O), msgs=O["msgs"], max_tokens=700)
-            if r:
-                st.markdown(r)
-                O["msgs"].append({"role": "assistant", "content": r})
-            else:
-                O["msgs"].pop()
-    answered = sum(m["role"] == "user" for m in O["msgs"]) - 1
+        answered += 1
+        if answered < 5:  # câu trả lời thứ 5 không cần nhận xét riêng, để dành lượt AI cho phần chấm điểm
+            with st.chat_message("assistant"):
+                with st.spinner("Giám khảo đang nhận xét..."):
+                    r = ask(oral_sys(O), msgs=O["msgs"], max_tokens=600)
+                if r:
+                    st.markdown(r)
+                    O["msgs"].append({"role": "assistant", "content": r})
+                else:
+                    O["msgs"].pop()
+                    answered -= 1
+    if answered >= 5 and not done:
+        st.info("Bạn đã trả lời đủ 5 câu. Bấm “Kết thúc và chấm điểm” để nhận kết quả.")
     if not done and answered >= 1 and st.button("Kết thúc và chấm điểm", icon=":material/fact_check:",
                                                   type="primary", key="b_o_end"):
         tr = "\n".join(f"{'Giám khảo' if m['role'] == 'assistant' else 'Học sinh'}: {m['content']}" for m in O["msgs"][1:])
         with st.spinner("Đang chấm phần vấn đáp..."):
-            res = ask_json(SYS_ORAL_GRADE, f"Chủ đề: {O['topic']}\nDạng: {O['kind']}\nBản ghi:\n{tr}", max_tokens=3000)
+            res = ask_json(SYS_ORAL_GRADE, f"Chủ đề: {O['topic']}\nDạng: {O['kind']}\nBản ghi:\n{tr}",
+                           max_tokens=2500, think="medium")
         if res:
             O["res"] = res
             res.setdefault("chu_de", O["topic"])
@@ -778,6 +1008,8 @@ def main():
     if not _has_key():
         st.warning("Chưa cấu hình API key: các tính năng AI tạm thời chưa hoạt động.")
     nav = st.segmented_control("Chức năng", list(PAGES), default="Chấm bài", key="nav", label_visibility="collapsed")
+    left = max(0, USER_DAILY - shared().used_of(("u", S.user.lower())))
+    st.caption(f"Lượt AI còn lại hôm nay của bạn: {left}/{USER_DAILY}. Câu hỏi trùng với người khác được dùng lại, không tốn lượt.")
     if nav:
         S.last_nav = nav
     PAGES[S.get("last_nav", "Chấm bài")]()
